@@ -222,4 +222,50 @@ def run(playwright):
             page.wait_for_timeout(4000)
 
             if page.locator("text='Server renewed successfully'").count() > 0:
-                
+                success_count += 1
+                print(f"✅ 第 {i + 1} 个服务器续期成功")
+            else:
+                fail_count += 1
+                print(f"⚠️ 第 {i + 1} 个服务器续期结果未知")
+
+        page.screenshot(path="final_page.png", full_page=True)
+
+        if success_count > 0 and fail_count == 0:
+            status_icon = "🟢"
+            status_text = f"续期成功（共 {success_count} 个服务器）"
+        elif success_count > 0 and fail_count > 0:
+            status_icon = "🟡"
+            status_text = f"部分成功（成功 {success_count} 个 / 失败 {fail_count} 个）"
+        else:
+            status_icon = "🔴"
+            status_text = f"续期失败（{fail_count} 个服务器未确认成功）"
+
+        tg_send(
+            f"{status_icon} <b>ACLClouds 续期通知</b>\n\n"
+            f"<b>结果：</b>{status_text}",
+            photo_path="final_page.png",
+        )
+
+        print("任务执行完毕。")
+
+    except Exception as e:
+        print(f"❌ 执行过程中发生错误: {e}")
+        try:
+            page.screenshot(path="final_page.png", full_page=True)
+        except Exception:
+            pass
+
+        tg_send(
+            f"🔴 <b>ACLClouds 续期通知</b>\n\n"
+            f"❌ <b>脚本执行异常</b>：\n<code>{e}</code>",
+            photo_path="final_page.png",
+        )
+    finally:
+        browser.close()
+        if gost_proc:
+            gost_proc.terminate()
+            print("gost 进程已终止。")
+
+
+with sync_playwright() as playwright:
+    run(playwright)
