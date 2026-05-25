@@ -57,10 +57,14 @@ def normalize_socks5_proxy(socks5_proxy: str) -> str:
 
     if socks5_proxy.startswith("socks5://"):
         socks5_proxy = socks5_proxy[len("socks5://"):]
-    elif socks5_proxy.startswith("socks5h://"):
-        socks5_proxy = socks5_proxy[len("socks5h://"):]
+    elif socks5_proxy.startswith("socks://"):
+        socks5_proxy = socks5_proxy[len("socks://"):]
+    elif socks5_proxy.startswith("socks4://"):
+        raise ValueError("当前脚本只支持 SOCKS5，不支持 SOCKS4。")
+    elif socks5_proxy.startswith("http://") or socks5_proxy.startswith("https://"):
+        raise ValueError("SOCKS5_PROXY 不能是 http/https 代理，请传入 socks/socks5 代理。")
     elif "://" in socks5_proxy:
-        raise ValueError("SOCKS5_PROXY 只能是 socks5 代理地址，请不要传入 http/https 代理。")
+        raise ValueError("SOCKS5_PROXY 协议头不受支持，请使用 socks://、socks5:// 或直接 host:port。")
 
     if not socks5_proxy or ":" not in socks5_proxy:
         raise ValueError("SOCKS5_PROXY 格式错误，应为 host:port 或 user:pass@host:port")
@@ -105,7 +109,7 @@ def start_gost(socks5_proxy: str) -> subprocess.Popen:
     poll_result = proc.poll()
     print(f"gost poll result: {poll_result}")
     if poll_result is not None:
-        raise RuntimeError("gost 启动失败，请检查 SOCKS5_PROXY 格式和 gost 是否已安装。")
+        raise RuntimeError("gost 启动失败，请检查 SOCKS5_PROXY 格式、账号密码和 gost 是否已安装。")
 
     wait_http_proxy_ready(LOCAL_HTTP_PORT)
     print(f"✅ gost 已启动，本地 HTTP 代理端口：{LOCAL_HTTP_PORT}")
