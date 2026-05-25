@@ -250,5 +250,3 @@ def run(playwright):
             gost_proc.terminate()
             print("gost 进程已终止。")
 
-with sync_playwright() as playwright:
-    run(playwright)
