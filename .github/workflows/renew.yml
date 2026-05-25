@@ -1,0 +1,51 @@
+name: ACLClouds Auto Renew
+
+on:
+  repository_dispatch:
+    types: [googlecloud-trigger]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
+
+jobs:
+  renew-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install gost
+        run: |
+          GOST_VER="2.12.0"
+          wget -q "https://github.com/ginuerzh/gost/releases/download/v${GOST_VER}/gost-linux-amd64-${GOST_VER}.gz" -O gost.gz
+          gunzip gost.gz
+          chmod +x gost
+          sudo mv gost /usr/local/bin/gost
+          gost -V
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright requests
+          playwright install chromium
+
+      - name: Run Renew Script
+        env:
+          ACL_COOKIES: ${{ secrets.ACL_COOKIES }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
+        run: python renew.py
+
+      - name: Upload Screenshot
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Debug-Screenshots
+          path: "*.png"
+          retention-days: 5
