@@ -36,20 +36,63 @@ def tg_send(text: str, photo_path: str = None):
         print(f"⚠️  TG 通知异常: {e}")
 
 # ── gost 代理启动 ──────────────────────────────────────────────
-# SOCKS5_PROXY 格式：user:pass@host:port 或 host:port
+# SOCKS5_PROXY 支持格式：
+# 1) user:pass@host:port
+# 2) host:port
+# 3) 兼容误填 socks5://user:pass@host:port 或 socks5://host:port
 LOCAL_HTTP_PORT = 18080
+
+def normalize_socks5_proxy(socks5_proxy: str) -> str:
+    socks5_proxy = (socks5_proxy or "").strip()
+    if socks5_proxy.startswith("socks5://"):
+        socks5_proxy = socks5_proxy[len("socks5://"):]
+    elif socks5_proxy.startswith("socks5h://"):
+        socks5_proxy = socks5_proxy[len("socks5h://"):]
+    elif "://" in socks5_proxy:
+        raise ValueError("SOCKS5_PROXY 只能是 socks5 代理地址，请不要传入 http/https 代理。")
+    if not socks5_proxy or ":" not in socks5_proxy:
+        raise ValueError("SOCKS5_PROXY 格式错误，应为 host:port 或 user:pass@host:port")
+    return socks5_proxy
+
+def wait_http_proxy_ready(port: int, timeout: int = 15):
+    proxies = {
+        "http": f"http://127.0.0.1:{port}",
+        "https": f"http://127.0.0.1:{port}",
+    }
+    last_error = None
+    start = time.time()
+
+    while time.time() - start < timeout:
+        try:
+            r = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=8)
+            if r.ok:
+                print(f"✅ 本地 HTTP 代理连通性测试成功：{r.text}")
+                return
+        except Exception as e:
+            last_error = e
+        time.sleep(1)
+
+    raise RuntimeError(f"本地 HTTP 代理就绪检测失败: {last_error}")
 
 def start_gost(socks5_proxy: str) -> subprocess.Popen:
     """
     将认证 SOCKS5 转为本地 HTTP 代理，供 Chromium 使用。
-    gost 命令：gost -L http://:18080 -F socks5://user:pass@host:port
+    gost 命令：gost -L http://127.0.0.1:18080 -F socks5://user:pass@host:port
     """
-    cmd = ["gost", "-L", f"http://:{LOCAL_HTTP_PORT}", "-F", f"socks5://{socks5_proxy}"]
+    normalized_proxy = normalize_socks5_proxy(socks5_proxy)
+    cmd = [
+        "gost",
+        "-L", f"http://127.0.0.1:{LOCAL_HTTP_PORT}",
+        "-F", f"socks5://{normalized_proxy}"
+    ]
     print(f"启动 gost：{' '.join(cmd)}")
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(2)  # 等待 gost 就绪
+    time.sleep(2)
+
     if proc.poll() is not None:
         raise RuntimeError("gost 启动失败，请检查 SOCKS5_PROXY 格式和 gost 是否已安装。")
+
+    wait_http_proxy_ready(LOCAL_HTTP_PORT)
     print(f"✅ gost 已启动，本地 HTTP 代理端口：{LOCAL_HTTP_PORT}")
     return proc
 
@@ -74,26 +117,25 @@ def run(playwright):
 
     browser = playwright.chromium.launch(
         headless=True,
-        proxy=proxy_config  # None 时 Playwright 忽略该参数
+        proxy=proxy_config
     )
     context = browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                   "Chrome/120.0.0.0 Safari/537.36",
-        proxy=proxy_config
+                   "Chrome/120.0.0.0 Safari/537.36"
     )
 
     # ── 解析 Cookie ──
     raw_cookies = os.environ.get('ACL_COOKIES', '').strip()
     if not raw_cookies:
         print("❌ 未找到 ACL_COOKIES 环境变量。")
-        tg_send("🔴 <b>ACLClouds 续期通知</b>\n\n❌ 登录失败：未找到 ACL_COOKIES 环境变量。")
+        tg_send("🔴 <b>ACLClouds 续期通知</b>\\n\\n❌ 登录失败：未找到 ACL_COOKIES 环境变量。")
         browser.close()
         if gost_proc:
             gost_proc.terminate()
         return
 
-    normalized = raw_cookies.replace('\n', ';').replace('\r', '')
+    normalized = raw_cookies.replace('\\n', ';').replace('\\r', '')
     cookies = []
     for item in normalized.split(';'):
         item = item.strip()
@@ -131,7 +173,7 @@ def run(playwright):
             print("❌ Cookie 未生效，被重定向到登录页！")
             page.screenshot(path="final_page.png", full_page=True)
             tg_send(
-                "🔴 <b>ACLClouds 续期通知</b>\n\n"
+                "🔴 <b>ACLClouds 续期通知</b>\\n\\n"
                 "❌ <b>登录失败</b>：Cookie 已过期，请重新获取并更新 Secret。",
                 photo_path="final_page.png"
             )
@@ -184,7 +226,7 @@ def run(playwright):
             status_text = f"续期失败（{fail_count} 个服务器未确认成功）"
 
         tg_send(
-            f"{status_icon} <b>ACLClouds 续期通知</b>\n\n"
+            f"{status_icon} <b>ACLClouds 续期通知</b>\\n\\n"
             f"<b>结果：</b>{status_text}",
             photo_path="final_page.png"
         )
@@ -198,8 +240,8 @@ def run(playwright):
         except:
             pass
         tg_send(
-            f"🔴 <b>ACLClouds 续期通知</b>\n\n"
-            f"❌ <b>脚本执行异常</b>：\n<code>{e}</code>",
+            f"🔴 <b>ACLClouds 续期通知</b>\\n\\n"
+            f"❌ <b>脚本执行异常</b>：\\n<code>{e}</code>",
             photo_path="final_page.png"
         )
     finally:
