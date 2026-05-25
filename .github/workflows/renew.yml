@@ -21,11 +21,19 @@ jobs:
 
       - name: Install gost
         run: |
+          set -euo pipefail
           GOST_VER="2.12.0"
-          wget -q "https://github.com/ginuerzh/gost/releases/download/v${GOST_VER}/gost-linux-amd64-${GOST_VER}.gz" -O gost.gz
-          gunzip gost.gz
+          URL="https://github.com/ginuerzh/gost/releases/download/v${GOST_VER}/gost-linux-amd64-${GOST_VER}.gz"
+
+          echo "Downloading gost from: $URL"
+          curl -fL "$URL" -o gost.gz
+
+          ls -lh gost.gz
+          gunzip -f gost.gz
           chmod +x gost
           sudo mv gost /usr/local/bin/gost
+
+          which gost
           gost -V
 
       - name: Install dependencies
