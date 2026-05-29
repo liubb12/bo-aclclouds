@@ -159,21 +159,21 @@ def run(playwright):
 
         print(f"✅ 登录成功：{page.url}")
 
-        # ── 查找 Renew / Reactive 按钮 ──
+        # ── 查找 Renew / Reactivate 按钮 ──
         renew_btns     = page.locator("text='Renew'")
-        reactivate_btns = page.locator("text='Reactive'")
+        reactivate_btns = page.locator("text='Reactivate'")
         renew_count     = renew_btns.count()
         reactivate_count = reactivate_btns.count()
-        print(f"Renew 按钮：{renew_count}，Reactive 按钮：{reactivate_count}")
+        print(f"Renew 按钮：{renew_count}，Reactivate 按钮：{reactivate_count}")
 
         if renew_count == 0 and reactivate_count == 0:
             # 不在操作窗口，静默跳过
-            print("ℹ️ 未检测到 Renew / Reactive 按钮，不在操作窗口，本次跳过。")
+            print("ℹ️ 未检测到 Renew / Reactivate 按钮，不在操作窗口，本次跳过。")
             return
 
-        # ── 逐服务器处理（Renew 与 Reactive 互斥，只会执行其中一个）──
+        # ── 逐服务器处理（Renew 与 Reactivate 互斥，只会执行其中一个）──
 
-        results = []  # 每条: {"action": "Renew"|"Reactive", "action_ok": bool, "server_status": str}
+        results = []  # 每条: {"action": "Renew"|"Reactivate", "action_ok": bool, "server_status": str}
 
         def handle_action_buttons(locator, action_name: str, total: int):
             """点击续期/重激活按钮，然后进入 Manage 检查状态。"""
@@ -252,13 +252,13 @@ def run(playwright):
                         pass
                     page.wait_for_timeout(2000)
 
-        # Renew 与 Reactive 互斥，只会命中其中一个分支
+        # Renew 与 Reactivate 互斥，只会命中其中一个分支
         if renew_count > 0:
             print(f"\n── 处理 {renew_count} 个 Renew ──")
             handle_action_buttons(renew_btns, "Renew", renew_count)
         elif reactivate_count > 0:
-            print(f"\n── 处理 {reactivate_count} 个 Reactive ──")
-            handle_action_buttons(reactivate_btns, "Reactive", reactivate_count)
+            print(f"\n── 处理 {reactivate_count} 个 Reactivate ──")
+            handle_action_buttons(reactivate_btns, "Reactivate", reactivate_count)
 
         # ── Console 页面截图（此时停留在最后一个服务器的 Console 页面）──
         page.wait_for_timeout(2000)
@@ -266,7 +266,7 @@ def run(playwright):
         print("✅ Console 页面截图已保存")
 
         # ── 判断是否需要发送 TG 通知 ──
-        # 规则：登录失败 / Renew 成功或失败 / Reactive 成功或失败 / 服务器 Offline 才通知
+        # 规则：登录失败 / Renew 成功或失败 / Reactivate 成功或失败 / 服务器 Offline 才通知
         need_notify = False
         lines = []
 
@@ -276,7 +276,7 @@ def run(playwright):
             status   = r["server_status"]
             is_offline = status.lower() != "online"
 
-            # 有 Renew/Reactive 操作就通知
+            # 有 Renew/Reactivate 操作就通知
             need_notify = True
 
             action_icon = "✅" if ok else "❌"
