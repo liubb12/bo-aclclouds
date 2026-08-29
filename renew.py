@@ -128,7 +128,7 @@ def run(playwright):
             cookies.append({
                 "name": name.strip(),
                 "value": value.strip(),
-                "domain": "aclclouds.com",
+                "domain": ".aclclouds.com",
                 "path": "/",
                 "httpOnly": True,
                 "secure": True,
@@ -138,15 +138,16 @@ def run(playwright):
     page = context.new_page()
 
     try:
-        # ── 写入 Cookie 并直达控制台 ──
-        print("访问主域名初始化...")
-        page.goto("https://aclclouds.com/", wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(2000)
+        # ── 注入 Cookie 并直接访问控制台 ──
         context.add_cookies(cookies)
 
-        print(f"访问服务器控制台：{SERVER_CONSOLE_URL}")
-        page.goto(SERVER_CONSOLE_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(4000)
+        print(f"直接访问服务器控制台：{SERVER_CONSOLE_URL}")
+        try:
+            page.goto(SERVER_CONSOLE_URL, wait_until="load", timeout=45000)
+        except Exception:
+            # 防止因某些外部资源卡住超时，尝试继续执行
+            pass
+        page.wait_for_timeout(5000)
 
         if "login" in page.url or "signin" in page.url:
             print("❌ Cookie 未生效，重定向到登录页。")
@@ -158,14 +159,14 @@ def run(playwright):
             )
             return
 
-        print(f"✅ 成功进入控制台：{page.url}")
+        print(f"✅ 成功进入页面：{page.url}")
 
         # ── 提取控制台页面中的剩余天数 / 到期信息 ──
         expire_info = "未知"
         try:
             body_text = page.inner_text("body").replace("\u00a0", " ").replace("\u202f", " ")
             
-            # 匹配形如 "3j 23h"、"4j"、"12h"、"3d 12h"
+            # 优先匹配倒计时模式（如 3j 23h, 4j, 12h, 3d 12h）
             time_match = re.search(r'(?i)\b(\d+\s*[jd]\s*(?:\d+\s*[hm])?)\b', body_text)
             if time_match:
                 expire_info = f"剩余 {time_match.group(1).strip()}"
@@ -185,14 +186,13 @@ def run(playwright):
         reactivate_count = reactivate_btns.count()
         print(f"Renew 按钮：{renew_count}，Reactivate 按钮：{reactivate_count}")
 
-        # ── 读取当前服务器状态（Online / Offline）──
+        # ── 读取服务器当前运行状态 ──
         status_el = page.locator(".mc-bar-status-text")
         server_status = status_el.inner_text().strip() if status_el.count() > 0 else "Online"
         print(f"⚡ 服务器当前运行状态：{server_status}")
 
         # ── 未到续期窗口 ──
         if renew_count == 0 and reactivate_count == 0:
-            # 如果处于离线状态，顺便点击启动
             if server_status.lower() != "online":
                 print("⚠️ 检测到服务器 Offline，尝试点击 Start 启动...")
                 start_btn = page.locator("button.power-btn[data-variant='start'], button:has-text('Démarrer')")
