@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import subprocess
 import requests
@@ -143,7 +144,7 @@ def run(playwright):
         print("访问项目页面...")
         page.goto("https://dash.aclclouds.com/projects", wait_until="domcontentloaded", timeout=60000)
         try:
-            page.wait_for_selector("text='My Projects'", timeout=15000)
+            page.wait_for_selector("text='My Projects', text='Mes Services'", timeout=15000)
         except Exception:
             pass
 
@@ -159,17 +160,34 @@ def run(playwright):
 
         print(f"✅ 登录成功：{page.url}")
 
+        # ── 提取页面剩余天数与到期时间 ──
+        expire_info = "未知"
+        try:
+            # 优先匹配面板中的倒计时特征（如 3j 23h、5d 12h、EXPIRE DANS 等）
+            body_text = page.locator("body").inner_text()
+            match = re.search(r'(?:EXPIRE\s*DANS|Expire\s*in|Échéance|Echeance)[\s:]*([0-9]+[jdhm]\s*[0-9]*[jdhm]*)', body_text, re.IGNORECASE)
+            if match:
+                expire_info = match.group(0).strip().replace('\n', ' ')
+            else:
+                # 备用粗匹配
+                simple_match = re.search(r'\b\d+[j|d]\s*\d+[h|m]\b', body_text)
+                if simple_match:
+                    expire_info = simple_match.group(0)
+        except Exception:
+            pass
+        print(f"⏳ 当前服务器到期状态：{expire_info}")
+
         # ── 查找 Renew / Reactivate 按钮 ──
-        renew_btns       = page.locator("text='Renew'")
-        reactivate_btns  = page.locator("text='Reactivate'")
+        renew_btns       = page.locator("text='Renew', text='Renouveler'")
+        reactivate_btns  = page.locator("text='Reactivate', text='Réactiver'")
         renew_count      = renew_btns.count()
         reactivate_count = reactivate_btns.count()
         print(f"Renew 按钮：{renew_count}，Reactivate 按钮：{reactivate_count}")
 
         if renew_count == 0 and reactivate_count == 0:
-            # 不在操作窗口，截取当前页面并跳过
+            # 不在操作窗口，保存仪表盘截图供查看
             page.screenshot(path="dashboard_status.png", full_page=True)
-            print("ℹ️ 未检测到 Renew / Reactivate 按钮，不在操作窗口，已保存页面截图并跳过。")
+            print(f"ℹ️ 未检测到 Renew / Reactivate 按钮（{expire_info}），不在操作窗口，已保存页面截图并跳过。")
             return
 
         # ── 逐服务器处理（Renew 与 Reactivate 互斥，只会执行其中一个）──
@@ -192,14 +210,14 @@ def run(playwright):
                 print(f"  已点击第 {i+1} 个 {action_name} 按钮，等待响应...")
                 page.wait_for_timeout(4000)
 
-                action_ok = page.locator("text='Server renewed successfully'").count() > 0
+                action_ok = page.locator("text='Server renewed successfully', text='renouvelé avec succès'").count() > 0
                 if action_ok:
                     print(f"  ✅ {action_name} 成功")
                 else:
                     print(f"  ⚠️ {action_name} 结果未确认")
 
                 # ── 进入 Manage → Console 页面 ──
-                manage_btn = page.locator("text='Manage'").first
+                manage_btn = page.locator("text='Manage', text='Gérer'").first
                 if manage_btn.count() == 0 or not manage_btn.is_visible():
                     print("  ⚠️ 未找到 Manage 按钮，跳过服务器状态检查。")
                     results.append({"action": action_name, "action_ok": action_ok, "server_status": "unknown"})
@@ -221,7 +239,7 @@ def run(playwright):
                 # ── 若 Offline 则点击 Start ──
                 if server_status.lower() != "online":
                     print("  服务器 Offline，尝试点击 Start...")
-                    start_btn = page.locator("button.power-btn[data-variant='start']")
+                    start_btn = page.locator("button.power-btn[data-variant='start'], button:has-text('Démarrer')")
                     if start_btn.count() > 0 and start_btn.is_visible():
                         start_btn.click()
                         print("  已点击 Start，监控 30s 等待上线...")
@@ -245,7 +263,7 @@ def run(playwright):
                 if not is_last:
                     page.goto("https://dash.aclclouds.com/projects", wait_until="domcontentloaded", timeout=60000)
                     try:
-                        page.wait_for_selector("text='My Projects'", timeout=15000)
+                        page.wait_for_selector("text='My Projects', text='Mes Services'", timeout=15000)
                     except Exception:
                         pass
                     page.wait_for_timeout(2000)
@@ -258,7 +276,7 @@ def run(playwright):
             print(f"\n── 处理 {reactivate_count} 个 Reactivate ──")
             handle_action_buttons(reactivate_btns, "Reactivate", reactivate_count)
 
-        # ── Console 页面截图（此时停留在最后一个服务器的 Console 页面）──
+        # ── Console 页面截图 ──
         page.wait_for_timeout(2000)
         page.screenshot(path="final_page.png", full_page=True)
         print("✅ Console 页面截图已保存")
@@ -287,6 +305,7 @@ def run(playwright):
 
             lines.append(
                 f"{action_icon} <b>{action}：</b>{action_text}\n"
+                f"   <b>剩余到期：</b>{expire_info}\n"
                 f"   <b>服务器状态：</b>{status_text}"
             )
 
