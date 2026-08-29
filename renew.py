@@ -142,8 +142,14 @@ def run(playwright):
         context.add_cookies(cookies)
 
         print("访问项目页面...")
-        page.goto("https://dash.aclclouds.com/projects", wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(3000)
+        page.goto("https://dash.aclclouds.com/projects", wait_until="domcontentloaded", timeout=60000)
+        
+        # 确保等待服务卡片和表格列表完全加载渲染完毕
+        try:
+            page.wait_for_selector("text=/Mes Services|My Projects|ÉCHÉANCE|Free/i", timeout=20000)
+        except Exception:
+            pass
+        page.wait_for_timeout(5000)
 
         if "login" in page.url or "signin" in page.url:
             print("❌ Cookie 未生效，重定向到登录页。")
@@ -157,34 +163,42 @@ def run(playwright):
 
         print(f"✅ 登录成功：{page.url}")
 
-        # ── 提取页面剩余天数 ──
+        # ── 提取页面剩余天数与到期时间 ──
         expire_info = "未知"
         try:
-            # 抓取整个页面的文本内容做多模式正则解析
+            # 获取页面全部纯文本，并将各类非标准空格转为普通空格
             body_text = page.inner_text("body")
-            
-            # 匹配模式 1: "3j 23h" 或 "3j" / "12h" / "3d 23h"
-            match = re.search(r'\b(\d+\s*[j|d]\s*(?:\d+\s*[h|m])?)\b', body_text, re.IGNORECASE)
-            if match:
-                expire_info = f"剩余 {match.group(1).strip()}"
-            else:
-                # 匹配模式 2: 带前缀的关键词
-                match_prefix = re.search(r'(?:EXPIRE\s*DANS|Expire\s*in|Échéance)[^\n\r]*?(\d+[^,\n\r]+)', body_text, re.IGNORECASE)
-                if match_prefix:
-                    expire_info = match_prefix.group(0).strip().replace('\n', ' ')
+            clean_text = body_text.replace("\u00a0", " ").replace("\u202f", " ")
+
+            # 策略 1：精准匹配面板倒计时格式（如 "3j 23h"、"4j"、"12h"、"3d 12h"）
+            time_match = re.search(r'(?i)\b(\d+\s*[jd]\s*(?:\d+\s*[hm])?)\b', clean_text)
+            if time_match:
+                expire_info = f"剩余 {time_match.group(1).strip()}"
+
+            # 策略 2：通过 EXPIRE DANS 组合匹配
+            if expire_info == "未知":
+                prefix_match = re.search(r'(?i)(?:EXPIRE\s*DANS|Expire\s*in)[\s:]*([^\n\r]+)', clean_text)
+                if prefix_match:
+                    expire_info = prefix_match.group(0).strip()
+
+            # 策略 3：通过页面底部续期提示匹配（如 "Le renouvellement sera disponible 2 jours avant expiration"）
+            if expire_info == "未知":
+                notice_match = re.search(r'(?i)(Le renouvellement sera disponible[^\n\r]+)', clean_text)
+                if notice_match:
+                    expire_info = notice_match.group(1).strip()
         except Exception as e:
             print(f"⚠️ 提取天数异常: {e}")
 
         print(f"⏳ 当前服务器到期状态：{expire_info}")
 
         # ── 查找 Renew / Reactivate 按钮 ──
-        renew_btns       = page.locator("text='Renew', text='Renouveler'")
-        reactivate_btns  = page.locator("text='Reactivate', text='Réactiver'")
+        renew_btns       = page.locator("button:has-text('Renew'), button:has-text('Renouveler'), a:has-text('Renew'), a:has-text('Renouveler')")
+        reactivate_btns  = page.locator("button:has-text('Reactivate'), button:has-text('Réactiver'), a:has-text('Reactivate'), a:has-text('Réactiver')")
         renew_count      = renew_btns.count()
         reactivate_count = reactivate_btns.count()
         print(f"Renew 按钮：{renew_count}，Reactivate 按钮：{reactivate_count}")
 
-        # ── 未到续期窗口 ──
+        # ── 未到续期窗口：直接截取当前面板并向 TG 发送通知 ──
         if renew_count == 0 and reactivate_count == 0:
             page.screenshot(path="dashboard_status.png", full_page=True)
             print(f"ℹ️ 未检测到 Renew / Reactivate 按钮（{expire_info}），已保存截图并推送到 Telegram。")
@@ -203,7 +217,7 @@ def run(playwright):
         def handle_action_buttons(locator, action_name: str, total: int):
             for i in range(total):
                 is_last = (i == total - 1)
-                btns = page.locator(f"text='{action_name}'")
+                btns = page.locator(f"button:has-text('{action_name}'), a:has-text('{action_name}')")
                 btn = btns.nth(0)
                 if not btn.is_visible():
                     print(f"  第 {i+1} 个 {action_name} 按钮不可见，跳过。")
@@ -215,13 +229,14 @@ def run(playwright):
                 print(f"  已点击第 {i+1} 个 {action_name} 按钮，等待响应...")
                 page.wait_for_timeout(4000)
 
-                action_ok = page.locator("text='Server renewed successfully', text='renouvelé avec succès'").count() > 0
+                action_ok = page.locator("text=/Server renewed successfully|renouvelé avec succès/i").count() > 0
                 if action_ok:
                     print(f"  ✅ {action_name} 成功")
                 else:
                     print(f"  ⚠️ {action_name} 结果未确认")
 
-                manage_btn = page.locator("text='Manage', text='Gérer'").first
+                # ── 进入 Manage → Console 页面 ──
+                manage_btn = page.locator("button:has-text('Manage'), button:has-text('Gérer'), a:has-text('Manage'), a:has-text('Gérer')").first
                 if manage_btn.count() == 0 or not manage_btn.is_visible():
                     print("  ⚠️ 未找到 Manage 按钮，跳过服务器状态检查。")
                     results.append({"action": action_name, "action_ok": action_ok, "server_status": "unknown"})
@@ -239,6 +254,7 @@ def run(playwright):
                 server_status = status_el.inner_text().strip() if status_el.count() > 0 else "unknown"
                 print(f"  服务器状态：{server_status}")
 
+                # ── 若 Offline 则点击 Start ──
                 if server_status.lower() != "online":
                     print("  服务器 Offline，尝试点击 Start...")
                     start_btn = page.locator("button.power-btn[data-variant='start'], button:has-text('Démarrer')")
@@ -262,8 +278,8 @@ def run(playwright):
                 results.append({"action": action_name, "action_ok": action_ok, "server_status": server_status})
 
                 if not is_last:
-                    page.goto("https://dash.aclclouds.com/projects", wait_until="networkidle", timeout=60000)
-                    page.wait_for_timeout(2000)
+                    page.goto("https://dash.aclclouds.com/projects", wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(3000)
 
         if renew_count > 0:
             print(f"\n── 处理 {renew_count} 个 Renew ──")
@@ -299,7 +315,7 @@ def run(playwright):
 
             lines.append(
                 f"{action_icon} <b>{action}：</b>{action_text}\n"
-                f"   ⏳ <b>当前到期：</b><code>{expire_info}</code>\n"
+                f"   ⏳ <b>到期状态：</b><code>{expire_info}</code>\n"
                 f"   ⚡ <b>服务器状态：</b>{status_text}"
             )
 
