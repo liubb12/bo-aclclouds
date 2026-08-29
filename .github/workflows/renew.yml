@@ -1,11 +1,11 @@
 name: ACLClouds Auto Renew
 
-#on:
-  #repository_dispatch:
-    #types: [googlecloud-trigger]
-  #workflow_dispatch:
-  #schedule:
-   # - cron: '0 * * * *'
+on:
+  repository_dispatch:
+    types: [googlecloud-trigger]
+ workflow_dispatch:
+ schedule:
+    - cron: '0 * * * *'
 
 jobs:
   renew-job:
