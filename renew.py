@@ -163,18 +163,30 @@ def run(playwright):
         # ── 提取页面剩余天数与到期时间 ──
         expire_info = "未知"
         try:
-            # 优先匹配面板中的倒计时特征（如 3j 23h、5d 12h、EXPIRE DANS 等）
-            body_text = page.locator("body").inner_text()
-            match = re.search(r'(?:EXPIRE\s*DANS|Expire\s*in|Échéance|Echeance)[\s:]*([0-9]+[jdhm]\s*[0-9]*[jdhm]*)', body_text, re.IGNORECASE)
-            if match:
-                expire_info = match.group(0).strip().replace('\n', ' ')
-            else:
-                # 备用粗匹配
-                simple_match = re.search(r'\b\d+[j|d]\s*\d+[h|m]\b', body_text)
-                if simple_match:
-                    expire_info = simple_match.group(0)
-        except Exception:
-            pass
+            # 显式等待到期时间关键字渲染
+            try:
+                page.wait_for_selector("text=/expire/i, text=/échéance/i", timeout=8000)
+            except Exception:
+                pass
+            
+            # 定位卡片容器提取具体时间（如 3j 23h / 5d 12h）
+            expire_el = page.locator("text=/expire dans/i, text=/échéance/i").first
+            if expire_el.count() > 0:
+                parent_text = expire_el.locator("xpath=..").inner_text()
+                m = re.search(r'(\d+\s*[jd]\s*\d*\s*[hm]*)', parent_text, re.IGNORECASE)
+                if m:
+                    expire_info = f"剩余 {m.group(1).strip()}"
+                else:
+                    expire_info = parent_text.replace("\n", " ").strip()
+            
+            if expire_info == "未知":
+                body_text = page.locator("body").inner_text()
+                m = re.search(r'(\d+\s*j\s*\d+\s*h|\d+\s*d\s*\d+\s*h)', body_text, re.IGNORECASE)
+                if m:
+                    expire_info = f"剩余 {m.group(1).strip()}"
+        except Exception as e:
+            print(f"⚠️ 提取天数异常: {e}")
+
         print(f"⏳ 当前服务器到期状态：{expire_info}")
 
         # ── 查找 Renew / Reactivate 按钮 ──
@@ -184,10 +196,17 @@ def run(playwright):
         reactivate_count = reactivate_btns.count()
         print(f"Renew 按钮：{renew_count}，Reactivate 按钮：{reactivate_count}")
 
+        # ── 未到续期窗口：直接截取当前面板，并向 TG 发送包含剩余天数的通知 ──
         if renew_count == 0 and reactivate_count == 0:
-            # 不在操作窗口，保存仪表盘截图供查看
             page.screenshot(path="dashboard_status.png", full_page=True)
-            print(f"ℹ️ 未检测到 Renew / Reactivate 按钮（{expire_info}），不在操作窗口，已保存页面截图并跳过。")
+            print(f"ℹ️ 未检测到 Renew / Reactivate 按钮（{expire_info}），已保存截图并推送到 Telegram。")
+            
+            tg_send(
+                f"ℹ️ <b>ACLClouds 状态巡检</b>\n\n"
+                f"⏳ <b>剩余有效时间：</b><code>{expire_info}</code>\n"
+                f"📌 <b>续期状态：</b>未到续期窗口（到期前 2 天开放）",
+                photo_path="dashboard_status.png"
+            )
             return
 
         # ── 逐服务器处理（Renew 与 Reactivate 互斥，只会执行其中一个）──
@@ -281,7 +300,7 @@ def run(playwright):
         page.screenshot(path="final_page.png", full_page=True)
         print("✅ Console 页面截图已保存")
 
-        # ── 判断是否需要发送 TG 通知 ──
+        # ── 续期成功/失败/重启通知 ──
         need_notify = False
         lines = []
 
@@ -305,8 +324,8 @@ def run(playwright):
 
             lines.append(
                 f"{action_icon} <b>{action}：</b>{action_text}\n"
-                f"   <b>剩余到期：</b>{expire_info}\n"
-                f"   <b>服务器状态：</b>{status_text}"
+                f"   ⏳ <b>到期状态：</b><code>{expire_info}</code>\n"
+                f"   ⚡ <b>服务器状态：</b>{status_text}"
             )
 
         if need_notify:
