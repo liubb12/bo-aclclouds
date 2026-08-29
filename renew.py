@@ -9,6 +9,9 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 LOCAL_HTTP_PORT = 18080
 
+# 你的专属控制台路径
+SERVER_CONSOLE_URL = "https://aclclouds.com/server/75e19d55"
+
 
 # ── Telegram 通知 ──────────────────────────────────────────────
 def tg_send(text: str, photo_path: str = None):
@@ -125,7 +128,7 @@ def run(playwright):
             cookies.append({
                 "name": name.strip(),
                 "value": value.strip(),
-                "domain": "dash.aclclouds.com",
+                "domain": "aclclouds.com",
                 "path": "/",
                 "httpOnly": True,
                 "secure": True,
@@ -135,21 +138,21 @@ def run(playwright):
     page = context.new_page()
 
     try:
-        # ── 登录 ──
+        # ── 登录与导航 ──
         print("访问主域名...")
-        page.goto("https://dash.aclclouds.com/", wait_until="domcontentloaded", timeout=30000)
+        page.goto("https://aclclouds.com/", wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(2000)
         context.add_cookies(cookies)
 
-        print("访问项目页面...")
-        page.goto("https://dash.aclclouds.com/projects", wait_until="domcontentloaded", timeout=60000)
+        print("访问服务列表页面...")
+        page.goto("https://aclclouds.com/services", wait_until="domcontentloaded", timeout=60000)
         
-        # 确保等待服务卡片和表格列表完全加载渲染完毕
+        # 确保服务卡片渲染
         try:
-            page.wait_for_selector("text=/Mes Services|My Projects|ÉCHÉANCE|Free/i", timeout=20000)
+            page.wait_for_selector("text=/Mes Services|ÉCHÉANCE|Free|Mon VPS/i", timeout=15000)
         except Exception:
             pass
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(4000)
 
         if "login" in page.url or "signin" in page.url:
             print("❌ Cookie 未生效，重定向到登录页。")
@@ -166,26 +169,20 @@ def run(playwright):
         # ── 提取页面剩余天数与到期时间 ──
         expire_info = "未知"
         try:
-            # 获取页面全部纯文本，并将各类非标准空格转为普通空格
-            body_text = page.inner_text("body")
-            clean_text = body_text.replace("\u00a0", " ").replace("\u202f", " ")
+            body_text = page.inner_text("body").replace("\u00a0", " ").replace("\u202f", " ")
 
-            # 策略 1：精准匹配面板倒计时格式（如 "3j 23h"、"4j"、"12h"、"3d 12h"）
-            time_match = re.search(r'(?i)\b(\d+\s*[jd]\s*(?:\d+\s*[hm])?)\b', clean_text)
+            # 匹配 3j 23h 等
+            time_match = re.search(r'(?i)\b(\d+\s*[jd]\s*(?:\d+\s*[hm])?)\b', body_text)
             if time_match:
                 expire_info = f"剩余 {time_match.group(1).strip()}"
-
-            # 策略 2：通过 EXPIRE DANS 组合匹配
-            if expire_info == "未知":
-                prefix_match = re.search(r'(?i)(?:EXPIRE\s*DANS|Expire\s*in)[\s:]*([^\n\r]+)', clean_text)
+            else:
+                prefix_match = re.search(r'(?i)(?:EXPIRE\s*DANS|Expire\s*in)[\s:]*([^\n\r]+)', body_text)
                 if prefix_match:
                     expire_info = prefix_match.group(0).strip()
-
-            # 策略 3：通过页面底部续期提示匹配（如 "Le renouvellement sera disponible 2 jours avant expiration"）
-            if expire_info == "未知":
-                notice_match = re.search(r'(?i)(Le renouvellement sera disponible[^\n\r]+)', clean_text)
-                if notice_match:
-                    expire_info = notice_match.group(1).strip()
+                else:
+                    notice_match = re.search(r'(?i)(Le renouvellement sera disponible[^\n\r]+)', body_text)
+                    if notice_match:
+                        expire_info = notice_match.group(1).strip()
         except Exception as e:
             print(f"⚠️ 提取天数异常: {e}")
 
@@ -198,7 +195,7 @@ def run(playwright):
         reactivate_count = reactivate_btns.count()
         print(f"Renew 按钮：{renew_count}，Reactivate 按钮：{reactivate_count}")
 
-        # ── 未到续期窗口：直接截取当前面板并向 TG 发送通知 ──
+        # ── 未到续期窗口：截图 + TG 推送 ──
         if renew_count == 0 and reactivate_count == 0:
             page.screenshot(path="dashboard_status.png", full_page=True)
             print(f"ℹ️ 未检测到 Renew / Reactivate 按钮（{expire_info}），已保存截图并推送到 Telegram。")
@@ -216,7 +213,6 @@ def run(playwright):
 
         def handle_action_buttons(locator, action_name: str, total: int):
             for i in range(total):
-                is_last = (i == total - 1)
                 btns = page.locator(f"button:has-text('{action_name}'), a:has-text('{action_name}')")
                 btn = btns.nth(0)
                 if not btn.is_visible():
@@ -235,21 +231,12 @@ def run(playwright):
                 else:
                     print(f"  ⚠️ {action_name} 结果未确认")
 
-                # ── 进入 Manage → Console 页面 ──
-                manage_btn = page.locator("button:has-text('Manage'), button:has-text('Gérer'), a:has-text('Manage'), a:has-text('Gérer')").first
-                if manage_btn.count() == 0 or not manage_btn.is_visible():
-                    print("  ⚠️ 未找到 Manage 按钮，跳过服务器状态检查。")
-                    results.append({"action": action_name, "action_ok": action_ok, "server_status": "unknown"})
-                    continue
+                # ── 直达 Console 控制台 ──
+                print(f"  正在进入控制台：{SERVER_CONSOLE_URL}")
+                page.goto(SERVER_CONSOLE_URL, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(3000)
 
-                manage_btn.click()
-                print("  已点击 Manage，等待 Console 页面加载...")
-                try:
-                    page.wait_for_selector(".mc-bar-status-text", timeout=15000)
-                except Exception:
-                    pass
-                page.wait_for_timeout(2000)
-
+                # ── 读取服务器状态 ──
                 status_el = page.locator(".mc-bar-status-text")
                 server_status = status_el.inner_text().strip() if status_el.count() > 0 else "unknown"
                 print(f"  服务器状态：{server_status}")
@@ -276,10 +263,6 @@ def run(playwright):
                         print("  ⚠️ 未找到 Start 按钮。")
 
                 results.append({"action": action_name, "action_ok": action_ok, "server_status": server_status})
-
-                if not is_last:
-                    page.goto("https://dash.aclclouds.com/projects", wait_until="domcontentloaded", timeout=60000)
-                    page.wait_for_timeout(3000)
 
         if renew_count > 0:
             print(f"\n── 处理 {renew_count} 个 Renew ──")
