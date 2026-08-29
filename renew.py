@@ -9,7 +9,6 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 LOCAL_HTTP_PORT = 18080
 
-# 你的专属控制台直达地址
 SERVER_CONSOLE_URL = "https://aclclouds.com/server/75e19d55"
 
 
@@ -125,28 +124,21 @@ def run(playwright):
         item = item.strip()
         if "=" in item:
             name, value = item.split("=", 1)
+            # 使用标准的 url 参数绑定，避免 Playwright 报 Invalid cookie fields
             cookies.append({
                 "name": name.strip(),
                 "value": value.strip(),
-                "domain": ".aclclouds.com",
-                "path": "/",
-                "httpOnly": True,
-                "secure": True,
+                "url": "https://aclclouds.com",
             })
     print(f"解析到 {len(cookies)} 个 Cookie")
 
+    # 注入 Cookie
+    context.add_cookies(cookies)
     page = context.new_page()
 
     try:
-        # ── 注入 Cookie 并直接访问控制台 ──
-        context.add_cookies(cookies)
-
-        print(f"直接访问服务器控制台：{SERVER_CONSOLE_URL}")
-        try:
-            page.goto(SERVER_CONSOLE_URL, wait_until="load", timeout=45000)
-        except Exception:
-            # 防止因某些外部资源卡住超时，尝试继续执行
-            pass
+        print(f"访问服务器控制台：{SERVER_CONSOLE_URL}")
+        page.goto(SERVER_CONSOLE_URL, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(5000)
 
         if "login" in page.url or "signin" in page.url:
