@@ -10,7 +10,8 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 LOCAL_HTTP_PORT = 18080
 
-SERVER_CONSOLE_URL = "https://aclclouds.com/server/75e19d55"
+SERVER_ID = "75e19d55"
+SERVER_CONSOLE_URL = f"https://aclclouds.com/server/{SERVER_ID}"
 
 
 # ── Telegram 通知 ──────────────────────────────────────────────
@@ -89,20 +90,19 @@ def get_expire_info(page) -> str:
     expire_info = "未知"
     try:
         body_text = page.inner_text("body").replace("\u00a0", " ").replace("\u202f", " ")
-        time_match = re.search(r'(?i)\b(\d+\s*[jd]\s*(?:\d+\s*[hm])?)\b', body_text)
+        time_match = re.search(r'(?i)(?:Time remaining|remaining|expire)[\s:]*([0-9]+\s*[jdhm]\s*(?:[0-9]+\s*[hm])?)', body_text)
         if time_match:
             expire_info = f"剩余 {time_match.group(1).strip()}"
         else:
-            prefix_match = re.search(r'(?i)(?:EXPIRE\s*DANS|Expire\s*in|Échéance|Echeance)[\s:]*([^\n\r]+)', body_text)
-            if prefix_match:
-                expire_info = prefix_match.group(0).strip()
+            time_match_simple = re.search(r'(?i)\b(\d+\s*[jd]\s*(?:\d+\s*[hm])?)\b', body_text)
+            if time_match_simple:
+                expire_info = f"剩余 {time_match_simple.group(1).strip()}"
     except Exception as e:
         print(f"⚠️ 提取天数异常: {e}")
     return expire_info
 
 
 def safe_start_server(page):
-    """安全尝试点击 Start 按钮，若不可点击则跳过"""
     try:
         start_btn = page.locator("button.power-btn[data-variant='start'], button:has-text('Démarrer'), button:has-text('Start')").first
         if start_btn.count() > 0 and start_btn.is_visible() and start_btn.is_enabled():
@@ -161,7 +161,6 @@ def run(playwright):
                 "value": value.strip(),
                 "url": "https://aclclouds.com",
             })
-    print(f"解析到 {len(cookies)} 个 Cookie")
 
     context.add_cookies(cookies)
     page = context.new_page()
@@ -186,71 +185,75 @@ def run(playwright):
         expire_info_before = get_expire_info(page)
         print(f"⏳ 续期前服务器到期状态：{expire_info_before}")
 
-        # ── 查找 Renew / Reactivate 按钮 ──
-        renew_btns = page.locator("button:has-text('Renew'), button:has-text('Renouveler'), a:has-text('Renew'), a:has-text('Renouveler')")
-        reactivate_btns = page.locator("button:has-text('Reactivate'), button:has-text('Réactiver'), a:has-text('Reactivate'), a:has-text('Réactiver')")
-        renew_count = renew_btns.count()
-        reactivate_count = reactivate_btns.count()
-        print(f"Renew 按钮：{renew_count}，Reactivate 按钮：{reactivate_count}")
+        # ── 1. 尝试直接通过前端环境调用后端续期 API ──
+        print("🚀 尝试通过页面内置 Fetch API 直接请求续期接口...")
+        api_result = page.evaluate("""
+            async (serverId) => {
+                const endpoints = [
+                    `/api/client/servers/${serverId}/renew`,
+                    `/api/client/servers/${serverId}/settings/renew`,
+                    `/api/client/servers/${serverId}/ws/renew`,
+                    `/server/${serverId}/renew`
+                ];
+                let results = [];
+                for (let url of endpoints) {
+                    try {
+                        let res = await fetch(url, {
+                            method: 'POST',
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json',
+                                'X-Requested-With': 'XMLHttpRequest'
+                            }
+                        });
+                        let text = await res.text();
+                        results.push(`${url} => [${res.status}] ${text.slice(0, 100)}`);
+                        if (res.ok) break;
+                    } catch (e) {
+                        results.push(`${url} => ERR: ${e.message}`);
+                    }
+                }
+                return results.join('\\n');
+            }
+        """, SERVER_ID)
+        print(f"📡 API 探测结果:\n{api_result}")
 
-        status_el = page.locator(".mc-bar-status-text")
-        server_status = status_el.inner_text().strip() if status_el.count() > 0 else "Online"
-        print(f"⚡ 服务器当前运行状态：{server_status}")
-
-        # ── 未到续期窗口 ──
-        if renew_count == 0 and reactivate_count == 0:
-            if server_status.lower() != "online":
-                safe_start_server(page)
-
-            page.screenshot(path="dashboard_status.png", full_page=True)
-            print(f"ℹ️ 未检测到 Renew / Reactivate 按钮（{expire_info_before}），发送状态通知并跳过。")
-            
-            tg_send(
-                f"ℹ️ <b>ACLClouds 状态巡检</b>\n\n"
-                f"⏳ <b>有效时间：</b><code>{html.escape(expire_info_before)}</code>\n"
-                f"⚡ <b>运行状态：</b><code>{html.escape(server_status)}</code>\n"
-                f"📌 <b>续期状态：</b>未到操作窗口（到期前 2 天开放）",
-                photo_path="dashboard_status.png"
-            )
-            return
-
-        # ── 1. 点击控制台的 Renew / Reactivate 按钮打开弹窗 ──
-        action_name = "Renew" if renew_count > 0 else "Reactivate"
-        target_btn = renew_btns.first if renew_count > 0 else reactivate_btns.first
-        
-        target_btn.scroll_into_view_if_needed()
-        target_btn.click()
-        print(f"👉 已点击主页面的 [{action_name}] 按钮，等待弹窗展开...")
+        # ── 2. 同时使用深层 JS 事件触发点击 ──
+        print("👉 执行深层真实鼠标事件触发 Renew 按钮...")
+        page.evaluate("""
+            () => {
+                const allButtons = Array.from(document.querySelectorAll('button, a'));
+                const renewBtn = allButtons.find(el => el.textContent.trim().toLowerCase().includes('renew'));
+                if (renewBtn) {
+                    ['mousedown', 'click', 'mouseup'].forEach(evName => {
+                        renewBtn.dispatchEvent(new MouseEvent(evName, { bubbles: true, cancelable: true, view: window }));
+                    });
+                }
+            }
+        """)
         page.wait_for_timeout(3000)
 
-        # ── 2. 在弹窗内寻找并点击确认提交按钮 ──
+        # ── 3. 检测是否有弹窗确认 ──
         confirm_selectors = [
+            ".swal2-confirm",
+            "button.swal2-confirm",
             "div[role='dialog'] button:has-text('Renew')",
-            "div[role='dialog'] button:has-text('Renouveler')",
             "div[role='dialog'] button:has-text('Confirm')",
-            "div[role='dialog'] button:has-text('Confirmer')",
-            "div[role='dialog'] button:has-text('Claim')",
-            ".modal button[type='submit']",
+            "div[role='dialog'] button:has-text('Yes')",
             "div[role='dialog'] button[type='submit']",
-            "button:has-text('Renew Server')",
-            "button:has-text('Renouveler le serveur')",
+            ".modal button[type='submit']",
         ]
-
-        confirm_btn_found = False
         for sel in confirm_selectors:
             btn = page.locator(sel).first
             if btn.count() > 0 and btn.is_visible():
-                print(f"👉 捕获到弹窗确认按钮: {sel}，正在点击确认...")
+                print(f"👉 捕获到二次确认按钮: {sel}，正在点击...")
                 btn.click()
-                confirm_btn_found = True
-                page.wait_for_timeout(4000)
+                page.wait_for_timeout(3000)
                 break
 
-        if not confirm_btn_found:
-            print("ℹ️ 未发现二次确认弹窗，可能直接生效，等待 3 秒...")
-            page.wait_for_timeout(3000)
+        page.wait_for_timeout(3000)
 
-        # ── 3. 刷新页面检查最新到期状态 ──
+        # ── 4. 刷新页面检查最新到期状态 ──
         page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(4000)
 
@@ -262,12 +265,12 @@ def run(playwright):
             safe_start_server(page)
 
         page.screenshot(path="final_page.png", full_page=True)
-        
+
         tg_send(
-            f"📋 <b>ACLClouds 续期通知</b>\n\n"
-            f"✅ <b>{action_name}：</b>操作已执行\n"
+            f"📋 <b>ACLClouds 续期执行结果</b>\n\n"
             f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
-            f"⚡ <b>服务器状态：</b><code>{html.escape(server_status)}</code>",
+            f"⚡ <b>服务器状态：</b><code>{html.escape(server_status)}</code>\n"
+            f"📡 <b>接口日志：</b>\n<code>{html.escape(api_result[:300])}</code>",
             photo_path="final_page.png",
         )
         print(f"\n任务执行完毕，最新状态: {expire_info_after}")
