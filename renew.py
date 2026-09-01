@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动登录与服务器续期脚本 (ACL 自定义验证码适配版)
+# ACLClouds 自动登录与服务器续期脚本 (物理指针过验版)
 # ============================================================
 import os
 import re
@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 
 BASE_URL = "https://aclclouds.com"
 LOGIN_URL = f"{BASE_URL}/auth/login"
@@ -60,7 +61,7 @@ def tg_send(text: str, photo_path: str = None):
 def normalize_socks5_proxy(proxy_value: str) -> str:
     proxy_value = (proxy_value or "").strip()
     for prefix in ("socks5://", "socks://"):
-        if proxy_value.startswith(prefix):
+        if prefix.startswith(prefix):
             proxy_value = proxy_value[len(prefix):]
             break
     if not proxy_value or ":" not in proxy_value:
@@ -115,7 +116,6 @@ def get_expire_info(driver) -> str:
 
 
 def set_input_value(driver, element, value):
-    """模拟人类逐字输入并触发 React 事件"""
     try:
         element.click()
         time.sleep(0.2)
@@ -134,34 +134,69 @@ def set_input_value(driver, element, value):
 
 
 def solve_acl_custom_captcha(driver):
-    """专门定位并点击 ACLClouds 自定义的 'I am not a robot' 复选框"""
-    print("  🛡️ 正在寻找并点击 'I am not a robot' 验证码复选框...", flush=True)
-    clicked = driver.execute_script("""
-        // 查找包含 I am not a robot 的元素或其内部的 checkbox/svg/span
-        const allElements = Array.from(document.querySelectorAll('div, span, p, label, input[type="checkbox"]'));
-        const robotLabel = allElements.find(el => {
-            const txt = (el.innerText || el.textContent || '').trim();
-            return txt.includes('I am not a robot') || txt.includes('not a robot');
+    """通过物理鼠标动作点击并验证 ACLClouds 验证码方框"""
+    print("  🛡️ 正在物理定位并点击验证码复选框...", flush=True)
+    
+    box_rect = driver.execute_script("""
+        const allNodes = Array.from(document.querySelectorAll('*'));
+        const robotLabel = allNodes.find(el => {
+            const t = (el.innerText || el.textContent || '').trim();
+            return t.includes('I am not a robot') || t.includes('not a robot');
         });
-
         if (robotLabel) {
-            // 优先查找其内部或兄弟节点的可点击方框
-            const box = robotLabel.querySelector('input[type="checkbox"], span, div, svg') || robotLabel;
-            box.click();
-            return true;
+            // 获取该行的左侧正方形区域
+            const rect = robotLabel.getBoundingClientRect();
+            return {
+                x: rect.left + 25, // 点击该行最左侧的复选框中心
+                y: rect.top + rect.height / 2,
+                width: rect.width,
+                height: rect.height
+            };
         }
-        return false;
+        return null;
     """)
-    if clicked:
-        print("  👉 已点击验证码复选框，等待响应 3 秒...", flush=True)
-        time.sleep(3)
+
+    if box_rect:
+        try:
+            # 1. 使用 ActionChains 执行真实物理光标移动并点击
+            actions = ActionChains(driver)
+            actions.move_by_offset(int(box_rect["x"]), int(box_rect["y"])).click().perform()
+            # 还原光标偏移
+            actions.move_by_offset(-int(box_rect["x"]), -int(box_rect["y"])).perform()
+        except Exception:
+            pass
+
+        # 2. 补发真实 Pointer + Mouse 事件链
+        driver.execute_script("""
+            const allNodes = Array.from(document.querySelectorAll('*'));
+            const robotLabel = allNodes.find(el => (el.innerText || el.textContent || '').includes('not a robot'));
+            if (robotLabel) {
+                const target = robotLabel.querySelector('input, span, div, svg') || robotLabel;
+                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                    target.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                });
+            }
+        """)
+
+        # 3. 轮询等待 8 秒，确认验证码是否被打勾或通过
+        for _ in range(8):
+            time.sleep(1)
+            verified = driver.execute_script("""
+                const robotLabel = Array.from(document.querySelectorAll('*')).find(el => (el.innerText || el.textContent || '').includes('not a robot'));
+                if (!robotLabel) return false;
+                const html = robotLabel.innerHTML || '';
+                return html.includes('check') || html.includes('svg') || html.includes('verified') || robotLabel.className.includes('checked');
+            """)
+            if verified:
+                print("  ✅ 验证码已成功勾选并通过！", flush=True)
+                break
     else:
-        print("  ⚠️ 未直接匹配到验证码文字，尝试通用 Captcha 破解...", flush=True)
+        print("  ⚠️ 未能获取到验证码坐标，尝试系统辅助点击...", flush=True)
         try:
             driver.uc_gui_click_captcha()
         except Exception:
             pass
-        time.sleep(2)
+        time.sleep(3)
 
 
 def main():
@@ -183,7 +218,7 @@ def main():
     driver = Driver(uc=True, headless=False, proxy=uc_proxy)
 
     try:
-        # 1. 登录页面
+        # 1. 打开登录页
         print(f"🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
         driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
         time.sleep(4)
@@ -201,15 +236,18 @@ def main():
         print("  📝 已填入密码", flush=True)
         time.sleep(1)
 
-        # 点击自定义验证码
+        # 物理点击并等待验证码
         solve_acl_custom_captcha(driver)
+        time.sleep(2)
 
         print("🔑 正在点击 [Sign in] 按钮提交登录...", flush=True)
+        submit_btn = driver.find_element(By.XPATH, "//button[contains(., 'Sign in') or contains(., 'Login') or contains(., 'Connexion') or @type='submit']")
+        
+        # 模拟物理点击提交按钮
         try:
-            submit_btn = driver.find_element(By.XPATH, "//button[contains(., 'Sign in') or contains(., 'Login') or contains(., 'Connexion') or @type='submit']")
-            driver.execute_script("arguments[0].click();", submit_btn)
+            submit_btn.click()
         except Exception:
-            pwd_elem.send_keys(Keys.RETURN)
+            driver.execute_script("arguments[0].click();", submit_btn)
 
         for _ in range(15):
             if "/auth/login" not in driver.current_url:
