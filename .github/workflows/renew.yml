@@ -1,4 +1,4 @@
-name: ACLClouds Renew
+name: ACLClouds Auto Renew
 
 on:
   schedule:
@@ -32,7 +32,8 @@ jobs:
 
       - name: Run Renew Script
         env:
-          ACL_COOKIES: ${{ secrets.ACL_COOKIES }}
+          ACL_USERNAME: ${{ secrets.ACL_USERNAME }}
+          ACL_PASSWORD: ${{ secrets.ACL_PASSWORD }}
           SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
