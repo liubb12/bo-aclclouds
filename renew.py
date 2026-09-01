@@ -1,13 +1,18 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 import os
 import re
 import html
 import time
+import socket
 import subprocess
 import requests
-from playwright.sync_api import sync_playwright
+from datetime import datetime, timezone, timedelta
+from seleniumbase import Driver
+from selenium.webdriver.common.by import By
 
-TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
-TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 LOCAL_HTTP_PORT = 18080
 
 SERVER_ID = "75e19d55"
@@ -37,11 +42,11 @@ def tg_send(text: str, photo_path: str = None):
                 timeout=30,
             )
         if resp.status_code == 200:
-            print("✅ TG 通知发送成功")
+            print("  ✅ TG 通知发送成功")
         else:
-            print(f"⚠️ TG 通知发送失败: {resp.text}")
+            print(f"  ⚠️ TG 通知发送失败: {resp.text}")
     except Exception as e:
-        print(f"⚠️ TG 通知异常: {e}")
+        print(f"  ⚠️ TG 通知异常: {e}")
 
 
 # ── gost 代理 ──────────────────────────────────────────────────
@@ -85,11 +90,11 @@ def start_gost(socks_proxy: str) -> subprocess.Popen:
     return proc
 
 
-def get_expire_info(page) -> str:
+def get_expire_info(driver) -> str:
     """提取页面到期信息"""
     expire_info = "未知"
     try:
-        body_text = page.inner_text("body").replace("\u00a0", " ").replace("\u202f", " ")
+        body_text = driver.get_text("body").replace("\u00a0", " ").replace("\u202f", " ")
         time_match = re.search(r'(?i)(?:Time remaining|remaining|expire)[\s:]*([0-9]+\s*[jdhm]\s*(?:[0-9]+\s*[hm])?)', body_text)
         if time_match:
             expire_info = f"剩余 {time_match.group(1).strip()}"
@@ -102,75 +107,55 @@ def get_expire_info(page) -> str:
     return expire_info
 
 
-# ── 主逻辑 ─────────────────────────────────────────────────────
-def run(playwright):
+def main():
     socks5_proxy = os.environ.get("SOCKS5_PROXY", "").strip()
     gost_proc = None
-    proxy_config = None
+    uc_proxy = None
 
     if socks5_proxy:
         try:
             gost_proc = start_gost(socks5_proxy)
-            proxy_config = {"server": f"http://127.0.0.1:{LOCAL_HTTP_PORT}"}
+            uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
             print("✅ 浏览器将通过代理访问。")
         except Exception as e:
             print(f"⚠️ 代理启动失败：{e}，将直接连接。")
-    else:
-        print("ℹ️ 未配置 SOCKS5_PROXY，直接连接。")
 
-    browser = playwright.chromium.launch(
-        headless=True,
-        proxy=proxy_config,
-        args=["--no-sandbox", "--disable-setuid-sandbox"]
-    )
-    context = browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        viewport={"width": 1920, "height": 1080}
-    )
-
-    # ── 解析 Cookie ──
     raw_cookies = os.environ.get("ACL_COOKIES", "").strip()
     if not raw_cookies:
         print("❌ 未找到 ACL_COOKIES 环境变量。")
         tg_send("🔴 <b>ACLClouds 续期通知</b>\n\n❌ 未找到 ACL_COOKIES 环境变量。")
-        browser.close()
         if gost_proc:
             gost_proc.terminate()
         return
 
-    normalized = raw_cookies.replace("\n", ";").replace("\r", "")
-    cookies = []
-    for item in normalized.split(";"):
-        item = item.strip()
-        if "=" in item:
-            name, value = item.split("=", 1)
-            cookies.append({
-                "name": name.strip(),
-                "value": value.strip(),
-                "url": "https://aclclouds.com",
-            })
-
-    context.add_cookies(cookies)
-    page = context.new_page()
-
-    network_logs = []
-    def log_response(res):
-        network_logs.append(f"[{res.status}] {res.url.split('?')[0]}")
-
-    page.on("response", log_response)
+    # 启动真实桌面的 Chrome (UC 模式)
+    driver = Driver(uc=True, headless=False, proxy=uc_proxy)
 
     try:
-        print(f"访问服务器控制台：{SERVER_CONSOLE_URL}")
-        page.goto(SERVER_CONSOLE_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(5000)
+        print("🌐 正在初始化访问 ACLClouds 域名...")
+        driver.uc_open_with_reconnect("https://aclclouds.com", reconnect_time=4)
+        time.sleep(2)
 
-        if "login" in page.url or "signin" in page.url:
+        # 注入 Cookie
+        normalized = raw_cookies.replace("\n", ";").replace("\r", "")
+        for item in normalized.split(";"):
+            item = item.strip()
+            if "=" in item:
+                name, value = item.split("=", 1)
+                driver.add_cookie({
+                    "name": name.strip(),
+                    "value": value.strip(),
+                    "domain": "aclclouds.com",
+                    "path": "/"
+                })
+        print("✅ Cookie 注入完成，打开服务器控制台...")
+
+        driver.get(SERVER_CONSOLE_URL)
+        time.sleep(5)
+
+        if "login" in driver.current_url or "signin" in driver.current_url:
             print("❌ Cookie 未生效，重定向到登录页。")
-            page.screenshot(path="dashboard_status.png", full_page=True)
+            driver.save_screenshot("dashboard_status.png")
             tg_send(
                 "🔴 <b>ACLClouds 续期通知</b>\n\n"
                 "❌ <b>登录失败</b>：Cookie 已过期，请重新获取并更新 Secret。",
@@ -178,104 +163,77 @@ def run(playwright):
             )
             return
 
-        print(f"✅ 成功进入页面：{page.url}")
+        print(f"✅ 成功进入页面：{driver.current_url}")
 
-        expire_info_before = get_expire_info(page)
+        expire_info_before = get_expire_info(driver)
         print(f"⏳ 续期前服务器到期状态：{expire_info_before}")
 
-        # ── 1. 穿透 React 内部属性直接执行 onClick ──
-        click_result = page.evaluate("""
-            () => {
-                const candidates = Array.from(document.querySelectorAll('button, div, span, a'));
-                const btn = candidates.find(el => {
-                    const txt = (el.innerText || el.textContent || '').trim();
-                    const isRenew = txt === 'Renew' || txt.includes('Renew') || txt.includes('Renouveler');
-                    return isRenew && el.clientWidth < 250 && el.clientHeight < 80 && el.id !== 'app';
-                });
+        # 查找提示条里的 Renew 按钮并使用 UC 模式物理点击
+        renew_xpath = "//button[contains(., 'Renew') or contains(., 'Renouveler')]"
+        driver.wait_for_element_visible(renew_xpath, by=By.XPATH, timeout=20)
+        renew_btn = driver.find_element(By.XPATH, renew_xpath)
 
-                if (!btn) return "未找到按钮";
+        print("👉 在真实桌面中物理点击 Renew 按钮...")
+        try:
+            renew_btn.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", renew_btn)
+        time.sleep(3)
 
-                // 1. 尝试直接调用 React Fiber 的 onClick 处理函数
-                const reactKey = Object.keys(btn).find(key => key.startsWith('__reactProps') || key.startsWith('__reactEventHandlers'));
-                if (reactKey && btn[reactKey] && typeof btn[reactKey].onClick === 'function') {
-                    btn[reactKey].onClick({ preventDefault: () => {}, stopPropagation: () => {} });
-                    return "已直接触发 React onClick 处理函数";
+        # 如果有弹窗或 Cloudflare 验证，直接处理
+        try:
+            driver.uc_gui_click_captcha()
+        except Exception:
+            pass
+
+        # 检查并点击弹窗确认按钮
+        modal_clicked = driver.execute_script("""
+            const modalBtns = Array.from(document.querySelectorAll('.swal2-confirm, div[role="dialog"] button, .modal button'));
+            for (let b of modalBtns) {
+                if (b.offsetWidth > 0 && b.offsetHeight > 0) {
+                    b.click();
+                    return true;
                 }
-
-                // 2. 模拟原生 Pointer + Mouse 事件链
-                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(type => {
-                    const event = new MouseEvent(type, { bubbles: true, cancelable: true, view: window });
-                    btn.dispatchEvent(event);
-                });
-                
-                btn.click();
-                return "已派发完整原生事件链并执行 click()";
             }
+            return false;
         """)
+        if modal_clicked:
+            print("👉 已点击弹窗确认按钮！")
+            time.sleep(3)
 
-        print(f"👉 触发结果: {click_result}")
-        page.wait_for_timeout(3000)
+        # 刷新页面验证最新天数
+        driver.refresh()
+        time.sleep(4)
 
-        # 截图记录触发后状态
-        page.screenshot(path="after_click.png", full_page=False)
+        expire_info_after = get_expire_info(driver)
+        driver.save_screenshot("final_page.png")
 
-        # ── 2. 处理可能出现的弹窗/二次确认 ──
-        modal_action = page.evaluate("""
-            () => {
-                const modals = Array.from(document.querySelectorAll('.swal2-confirm, div[role="dialog"] button, .modal button'));
-                for (let b of modals) {
-                    if (b.offsetWidth > 0 && b.offsetHeight > 0) {
-                        b.click();
-                        return "点击了弹窗按钮: " + (b.innerText || b.textContent);
-                    }
-                }
-                return "未出现弹窗";
-            }
-        """)
-        print(f"👉 弹窗状态: {modal_action}")
-        page.wait_for_timeout(3000)
-
-        # ── 3. 刷新页面验证续期结果 ──
-        page.reload(wait_until="domcontentloaded")
-        page.wait_for_timeout(4000)
-
-        expire_info_after = get_expire_info(page)
-        status_el = page.locator(".mc-bar-status-text")
-        server_status = status_el.inner_text().strip() if status_el.count() > 0 else "Online"
-
-        page.screenshot(path="final_page.png", full_page=True)
-
-        recent_logs = "\n".join(network_logs[-4:]) if network_logs else "无网络请求"
-        print(f"📡 最近网络接口:\n{recent_logs}")
-
+        now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
         tg_send(
-            f"📋 <b>ACLClouds 续期执行反馈</b>\n\n"
+            f"📋 <b>ACLClouds 续期执行结果 (真实浏览器版)</b>\n\n"
             f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
-            f"⚡ <b>服务器状态：</b><code>{html.escape(server_status)}</code>\n"
-            f"🎯 <b>触发方式：</b><code>{html.escape(click_result)}</code>\n"
-            f"📡 <b>接口日志：</b>\n<code>{html.escape(recent_logs)}</code>",
-            photo_path="after_click.png" if os.path.exists("after_click.png") else "final_page.png",
+            f"⏰ <b>执行时间：</b><code>{now}</code>",
+            photo_path="final_page.png",
         )
         print(f"\n任务执行完毕，最新状态: {expire_info_after}")
 
     except Exception as e:
         err_msg = str(e)
-        print(f"❌ 执行过程中发生错误: {err_msg}")
+        print(f"❌ 执行异常: {err_msg}")
         try:
-            page.screenshot(path="dashboard_status.png", full_page=True)
+            driver.save_screenshot("dashboard_status.png")
         except Exception:
             pass
         tg_send(
-            f"🔴 <b>ACLClouds 续期通知</b>\n\n"
-            f"❌ <b>脚本执行异常</b>：\n<code>{html.escape(err_msg)}</code>",
+            f"🔴 <b>ACLClouds 续期通知</b>\n\n❌ <b>脚本执行异常</b>：\n<code>{html.escape(err_msg)}</code>",
             photo_path="dashboard_status.png",
         )
     finally:
-        browser.close()
+        driver.quit()
         if gost_proc:
             gost_proc.terminate()
             print("gost 进程已终止。")
 
 
-with sync_playwright() as playwright:
-    run(playwright)
+if __name__ == "__main__":
+    main()
