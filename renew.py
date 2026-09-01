@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动登录与服务器续期脚本 (叶子节点精准点击版)
+# ACLClouds 自动登录与服务器续期脚本 (弹窗 Anti-bot 验证码适配版)
 # ============================================================
 import os
 import re
@@ -133,44 +133,36 @@ def set_input_value(driver, element, value):
         pass
 
 
-def solve_acl_custom_captcha(driver):
-    """精准定位底层的 'I am not a robot' 叶子节点与方框并点击"""
-    print("  🛡️ 正在精准定位验证码复选框...", flush=True)
+def solve_acl_custom_captcha(driver, context_name="登录页"):
+    """专门定位并点击 'I am not a robot' 复选框"""
+    print(f"  🛡️ 正在处理 [{context_name}] 的 'I am not a robot' 验证码...", flush=True)
     
-    # 查找最底层的文本节点所在的最小父容器
-    target_found = driver.execute_script("""
-        // 查找直接包含 'not a robot' 且子节点最少的最深层节点
+    clicked = driver.execute_script("""
         const candidates = Array.from(document.querySelectorAll('*')).filter(el => {
             const txt = (el.innerText || el.textContent || '').trim();
-            return txt.includes('not a robot') && el.children.length <= 3 && el.clientHeight < 100;
+            return txt.includes('not a robot') && el.children.length <= 4 && el.clientHeight < 120;
         });
 
         if (candidates.length === 0) return false;
         
-        // 取最小的那个容器
-        const targetContainer = candidates[0];
-        
-        // 优先在容器内寻找可点击元素，若无则取容器本身
-        const clickable = targetContainer.querySelector('input, span, div, svg') || targetContainer;
+        const container = candidates[0];
+        const clickable = container.querySelector('input, span, div, svg') || container;
         clickable.scrollIntoView({ block: 'center' });
 
-        // 派发全套鼠标物理事件
         ['mouseover', 'mouseenter', 'mousedown', 'mouseup', 'click'].forEach(evtType => {
             clickable.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
         });
-        
         return true;
     """)
 
-    if target_found:
-        print("  👉 已命中底层验证码方框并派发点击事件，等待 3 秒...", flush=True)
+    if clicked:
+        print(f"  👉 [{context_name}] 已派发物理事件点击验证码方框，等待 3 秒...", flush=True)
         time.sleep(3)
     else:
-        # XPath 备选定位
         try:
             box_elem = driver.find_element(By.XPATH, "//*[contains(text(), 'not a robot')]/..")
             ActionChains(driver).move_to_element(box_elem).click().perform()
-            print("  👉 XPath 定位成功并点击", flush=True)
+            print(f"  👉 [{context_name}] XPath 点击完成", flush=True)
             time.sleep(3)
         except Exception:
             pass
@@ -195,7 +187,7 @@ def main():
     driver = Driver(uc=True, headless=False, proxy=uc_proxy)
 
     try:
-        # 1. 打开登录页
+        # 1. 登录
         print(f"🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
         driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
         time.sleep(4)
@@ -213,8 +205,7 @@ def main():
         print("  📝 已填入密码", flush=True)
         time.sleep(1)
 
-        # 点击验证码
-        solve_acl_custom_captcha(driver)
+        solve_acl_custom_captcha(driver, context_name="登录页")
         time.sleep(2)
 
         print("🔑 正在点击 [Sign in] 按钮提交登录...", flush=True)
@@ -247,7 +238,7 @@ def main():
 
         print(f"✅ 登录成功！当前页面: {driver.current_url}", flush=True)
 
-        # 2. 访问服务器控制台
+        # 2. 控制台
         print(f"🔄 打开服务器控制台: {SERVER_CONSOLE_URL} ...", flush=True)
         driver.get(SERVER_CONSOLE_URL)
         time.sleep(5)
@@ -281,20 +272,10 @@ def main():
             driver.execute_script("arguments[0].click();", renew_elements[0])
         time.sleep(3)
 
-        # 4. 检测并确认弹窗
-        modal_clicked = driver.execute_script("""
-            const modalBtns = Array.from(document.querySelectorAll('.swal2-confirm, div[role="dialog"] button, .modal button'));
-            for (let b of modalBtns) {
-                if (b.offsetWidth > 0 && b.offsetHeight > 0) {
-                    b.click();
-                    return true;
-                }
-            }
-            return false;
-        """)
-        if modal_clicked:
-            print("👉 已点击弹窗确认按钮！", flush=True)
-            time.sleep(3)
+        # 4. 处理弹出的 Anti-bot confirmation 对话框中的验证码
+        print("🔍 检查 Anti-bot confirmation 弹窗...", flush=True)
+        solve_acl_custom_captcha(driver, context_name="Anti-bot 弹窗")
+        time.sleep(4)
 
         # 5. 刷新页面检查最新天数
         driver.refresh()
