@@ -159,11 +159,7 @@ def run(playwright):
 
     network_logs = []
     def log_response(res):
-        if any(k in res.url.lower() for k in ["renew", "server", "api", "extension"]):
-            try:
-                network_logs.append(f"[{res.status}] {res.url.split('?')[0]}")
-            except Exception:
-                pass
+        network_logs.append(f"[{res.status}] {res.url.split('?')[0]}")
 
     page.on("response", log_response)
 
@@ -187,71 +183,59 @@ def run(playwright):
         expire_info_before = get_expire_info(page)
         print(f"⏳ 续期前服务器到期状态：{expire_info_before}")
 
-        # ── 1. 定位顶部横条中的黑色 Renew 按钮 ──
-        button_info = page.evaluate("""
+        # ── 1. 穿透 React 内部属性直接执行 onClick ──
+        click_result = page.evaluate("""
             () => {
-                // 遍历所有可能的按钮与可点击元素
-                const candidates = Array.from(document.querySelectorAll('button, a, div[role="button"], span[role="button"]'));
-                
-                // 寻找文本严格包含 Renew/Renouveler 且不是大容器的叶子/小组件节点
-                const match = candidates.find(el => {
-                    const txt = el.innerText ? el.innerText.trim() : '';
-                    const isRenew = txt.toLowerCase().includes('renew') || txt.toLowerCase().includes('renouveler');
-                    const isSmall = el.clientWidth < 300 && el.clientHeight < 100;
-                    return isRenew && isSmall && el.id !== 'app';
+                const candidates = Array.from(document.querySelectorAll('button, div, span, a'));
+                const btn = candidates.find(el => {
+                    const txt = (el.innerText || el.textContent || '').trim();
+                    const isRenew = txt === 'Renew' || txt.includes('Renew') || txt.includes('Renouveler');
+                    return isRenew && el.clientWidth < 250 && el.clientHeight < 80 && el.id !== 'app';
                 });
 
-                if (!match) return null;
-                const rect = match.getBoundingClientRect();
-                return {
-                    tagName: match.tagName,
-                    text: match.innerText.trim(),
-                    x: rect.x + rect.width / 2,
-                    y: rect.y + rect.height / 2,
-                    outerHTML: match.outerHTML.slice(0, 200)
-                };
+                if (!btn) return "未找到按钮";
+
+                // 1. 尝试直接调用 React Fiber 的 onClick 处理函数
+                const reactKey = Object.keys(btn).find(key => key.startsWith('__reactProps') || key.startsWith('__reactEventHandlers'));
+                if (reactKey && btn[reactKey] && typeof btn[reactKey].onClick === 'function') {
+                    btn[reactKey].onClick({ preventDefault: () => {}, stopPropagation: () => {} });
+                    return "已直接触发 React onClick 处理函数";
+                }
+
+                // 2. 模拟原生 Pointer + Mouse 事件链
+                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(type => {
+                    const event = new MouseEvent(type, { bubbles: true, cancelable: true, view: window });
+                    btn.dispatchEvent(event);
+                });
+                
+                btn.click();
+                return "已派发完整原生事件链并执行 click()";
             }
         """)
 
-        print(f"🔍 真实 Renew 按钮定位结果: {button_info}")
-
-        if not button_info:
-            print("⚠️ 未能在提示栏中定位到独立的 Renew 按钮")
-            tg_send(
-                f"ℹ️ <b>ACLClouds 状态巡检</b>\n\n"
-                f"⏳ <b>有效时间：</b><code>{html.escape(expire_info_before)}</code>\n"
-                f"📌 <b>未找到可点击的 Renew 按钮</b>",
-                photo_path="dashboard_status.png"
-            )
-            return
-
-        # ── 2. 真实物理点击定位到的 Renew 按钮 ──
-        target_x = button_info["x"]
-        target_y = button_info["y"]
-        print(f"👉 鼠标移动并物理点击真实按钮坐标: ({target_x}, {target_y}) ...")
-        
-        page.mouse.move(target_x, target_y)
-        page.wait_for_timeout(300)
-        page.mouse.click(target_x, target_y)
+        print(f"👉 触发结果: {click_result}")
         page.wait_for_timeout(3000)
 
-        # ── 3. 检测是否弹出二次确认框/模态框 ──
-        modal_clicked = page.evaluate("""
+        # 截图记录触发后状态
+        page.screenshot(path="after_click.png", full_page=False)
+
+        # ── 2. 处理可能出现的弹窗/二次确认 ──
+        modal_action = page.evaluate("""
             () => {
-                const modalBtns = Array.from(document.querySelectorAll('.swal2-confirm, div[role="dialog"] button, .modal button'));
-                const confirmBtn = modalBtns.find(b => b.offsetWidth > 0 && b.offsetHeight > 0);
-                if (confirmBtn) {
-                    confirmBtn.click();
-                    return true;
+                const modals = Array.from(document.querySelectorAll('.swal2-confirm, div[role="dialog"] button, .modal button'));
+                for (let b of modals) {
+                    if (b.offsetWidth > 0 && b.offsetHeight > 0) {
+                        b.click();
+                        return "点击了弹窗按钮: " + (b.innerText || b.textContent);
+                    }
                 }
-                return false;
+                return "未出现弹窗";
             }
         """)
-        if modal_clicked:
-            print("👉 已点击弹窗确认按钮！")
-            page.wait_for_timeout(3000)
+        print(f"👉 弹窗状态: {modal_action}")
+        page.wait_for_timeout(3000)
 
-        # ── 4. 刷新页面验证续期结果 ──
+        # ── 3. 刷新页面验证续期结果 ──
         page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(4000)
 
@@ -261,16 +245,16 @@ def run(playwright):
 
         page.screenshot(path="final_page.png", full_page=True)
 
-        logs_summary = "\n".join(network_logs[-3:]) if network_logs else "无相关接口触发"
-        print(f"📡 捕获网络日志: {logs_summary}")
+        recent_logs = "\n".join(network_logs[-4:]) if network_logs else "无网络请求"
+        print(f"📡 最近网络接口:\n{recent_logs}")
 
         tg_send(
-            f"📋 <b>ACLClouds 续期结果反馈</b>\n\n"
+            f"📋 <b>ACLClouds 续期执行反馈</b>\n\n"
             f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
             f"⚡ <b>服务器状态：</b><code>{html.escape(server_status)}</code>\n"
-            f"🎯 <b>点击坐标：</b><code>({target_x:.1f}, {target_y:.1f})</code>\n"
-            f"📡 <b>接口响应：</b>\n<code>{html.escape(logs_summary)}</code>",
-            photo_path="final_page.png",
+            f"🎯 <b>触发方式：</b><code>{html.escape(click_result)}</code>\n"
+            f"📡 <b>接口日志：</b>\n<code>{html.escape(recent_logs)}</code>",
+            photo_path="after_click.png" if os.path.exists("after_click.png") else "final_page.png",
         )
         print(f"\n任务执行完毕，最新状态: {expire_info_after}")
 
