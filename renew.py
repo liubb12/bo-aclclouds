@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动登录与服务器续期脚本 (SeleniumBase UC 版)
+# ACLClouds 自动登录与服务器续期脚本 (强化交互版)
 # ============================================================
 import os
 import re
@@ -137,6 +137,23 @@ def get_expire_info(driver) -> str:
     return expire_info
 
 
+def set_react_input(driver, element, value):
+    """通过 React 原生 setter 强写入表单值，确保触发状态绑定"""
+    driver.execute_script("""
+        const el = arguments[0];
+        const val = arguments[1];
+        const lastValue = el.value;
+        el.value = val;
+        const event = new Event('input', { bubbles: true });
+        const tracker = el._valueTracker;
+        if (tracker) {
+            tracker.setValue(lastValue);
+        }
+        el.dispatchEvent(event);
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+    """, element, value)
+
+
 def main():
     if not ACL_USERNAME or not ACL_PASSWORD:
         print("❌ 未在 Secrets 中配置 ACL_USERNAME 或 ACL_PASSWORD", flush=True)
@@ -161,6 +178,7 @@ def main():
         driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
         time.sleep(3)
 
+        # 查找输入框
         user_selector = "input[name='user'], input[name='username'], input[name='email'], input[type='text'], input[type='email']"
         driver.wait_for_element_visible(user_selector, timeout=25)
 
@@ -168,12 +186,14 @@ def main():
         user_elem.click()
         user_elem.clear()
         user_elem.send_keys(ACL_USERNAME)
+        set_react_input(driver, user_elem, ACL_USERNAME)
         time.sleep(1)
 
         pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
         pwd_elem.click()
         pwd_elem.clear()
         pwd_elem.send_keys(ACL_PASSWORD)
+        set_react_input(driver, pwd_elem, ACL_PASSWORD)
         time.sleep(1)
 
         print("🛡️ 正在进行登录页 Turnstile 人机验证与物理点击...", flush=True)
@@ -182,11 +202,12 @@ def main():
 
         print("🔑 正在提交登录...", flush=True)
         try:
-            submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+            submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], button:has-text('Login'), button:has-text('Connexion')")
             driver.execute_script("arguments[0].click();", submit_btn)
         except Exception:
             pwd_elem.send_keys(Keys.RETURN)
 
+        # 等待跳转
         for _ in range(12):
             if "/auth/login" not in driver.current_url:
                 break
@@ -194,9 +215,15 @@ def main():
 
         if "/auth/login" in driver.current_url:
             driver.save_screenshot("login_failed.png")
-            print("❌ 登录未成功跳转，停留在登录页", flush=True)
+            body_text = driver.get_text("body")
+            err_hint = "页面未跳转"
+            for line in body_text.split("\n"):
+                if any(k in line.lower() for k in ["invalid", "incorrect", "password", "captcha", "turnstile", "erreur", "mot de passe"]):
+                    err_hint = line.strip()
+                    break
+            print(f"❌ 登录未成功跳转，页面提示: {err_hint}", flush=True)
             tg_send(
-                "🔴 <b>ACLClouds 续期通知</b>\n\n❌ <b>登录失败</b>：用户名或密码错误，或人机验证未通过。",
+                f"🔴 <b>ACLClouds 登录失败</b>\n\n❌ <b>提示：</b><code>{html.escape(err_hint)}</code>",
                 photo_path="login_failed.png"
             )
             return
