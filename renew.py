@@ -102,7 +102,7 @@ def get_expire_info(page) -> str:
 
 
 def safe_start_server(page):
-    """安全尝试点击 Start 按钮，若 disabled 则跳过"""
+    """安全尝试点击 Start 按钮，若不可点击则跳过"""
     try:
         start_btn = page.locator("button.power-btn[data-variant='start'], button:has-text('Démarrer'), button:has-text('Start')").first
         if start_btn.count() > 0 and start_btn.is_visible() and start_btn.is_enabled():
@@ -183,8 +183,8 @@ def run(playwright):
 
         print(f"✅ 成功进入页面：{page.url}")
 
-        expire_info = get_expire_info(page)
-        print(f"⏳ 当前服务器到期状态：{expire_info}")
+        expire_info_before = get_expire_info(page)
+        print(f"⏳ 续期前服务器到期状态：{expire_info_before}")
 
         # ── 查找 Renew / Reactivate 按钮 ──
         renew_btns = page.locator("button:has-text('Renew'), button:has-text('Renouveler'), a:has-text('Renew'), a:has-text('Renouveler')")
@@ -203,27 +203,54 @@ def run(playwright):
                 safe_start_server(page)
 
             page.screenshot(path="dashboard_status.png", full_page=True)
-            print(f"ℹ️ 未检测到 Renew / Reactivate 按钮（{expire_info}），发送状态通知并跳过。")
+            print(f"ℹ️ 未检测到 Renew / Reactivate 按钮（{expire_info_before}），发送状态通知并跳过。")
             
             tg_send(
                 f"ℹ️ <b>ACLClouds 状态巡检</b>\n\n"
-                f"⏳ <b>有效时间：</b><code>{html.escape(expire_info)}</code>\n"
+                f"⏳ <b>有效时间：</b><code>{html.escape(expire_info_before)}</code>\n"
                 f"⚡ <b>运行状态：</b><code>{html.escape(server_status)}</code>\n"
                 f"📌 <b>续期状态：</b>未到操作窗口（到期前 2 天开放）",
                 photo_path="dashboard_status.png"
             )
             return
 
-        # ── 存在续期/激活按钮时进行操作 ──
+        # ── 1. 点击控制台的 Renew / Reactivate 按钮打开弹窗 ──
         action_name = "Renew" if renew_count > 0 else "Reactivate"
         target_btn = renew_btns.first if renew_count > 0 else reactivate_btns.first
         
         target_btn.scroll_into_view_if_needed()
         target_btn.click()
-        print(f"已点击 {action_name} 按钮，等待响应...")
-        page.wait_for_timeout(4000)
+        print(f"👉 已点击主页面的 [{action_name}] 按钮，等待弹窗展开...")
+        page.wait_for_timeout(3000)
 
-        # 刷新页面检查续期后状态与天数
+        # ── 2. 在弹窗内寻找并点击确认提交按钮 ──
+        confirm_selectors = [
+            "div[role='dialog'] button:has-text('Renew')",
+            "div[role='dialog'] button:has-text('Renouveler')",
+            "div[role='dialog'] button:has-text('Confirm')",
+            "div[role='dialog'] button:has-text('Confirmer')",
+            "div[role='dialog'] button:has-text('Claim')",
+            ".modal button[type='submit']",
+            "div[role='dialog'] button[type='submit']",
+            "button:has-text('Renew Server')",
+            "button:has-text('Renouveler le serveur')",
+        ]
+
+        confirm_btn_found = False
+        for sel in confirm_selectors:
+            btn = page.locator(sel).first
+            if btn.count() > 0 and btn.is_visible():
+                print(f"👉 捕获到弹窗确认按钮: {sel}，正在点击确认...")
+                btn.click()
+                confirm_btn_found = True
+                page.wait_for_timeout(4000)
+                break
+
+        if not confirm_btn_found:
+            print("ℹ️ 未发现二次确认弹窗，可能直接生效，等待 3 秒...")
+            page.wait_for_timeout(3000)
+
+        # ── 3. 刷新页面检查最新到期状态 ──
         page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(4000)
 
@@ -239,11 +266,11 @@ def run(playwright):
         tg_send(
             f"📋 <b>ACLClouds 续期通知</b>\n\n"
             f"✅ <b>{action_name}：</b>操作已执行\n"
-            f"⏳ <b>最新到期状态：</b><code>{html.escape(expire_info_after)}</code>\n"
+            f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
             f"⚡ <b>服务器状态：</b><code>{html.escape(server_status)}</code>",
             photo_path="final_page.png",
         )
-        print("\n任务执行完毕。")
+        print(f"\n任务执行完毕，最新状态: {expire_info_after}")
 
     except Exception as e:
         err_msg = str(e)
