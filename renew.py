@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动登录与服务器续期脚本 (弹窗 Anti-bot 验证码适配版)
+# ACLClouds 自动登录与服务器续期脚本 (最终完善版)
 # ============================================================
 import os
 import re
@@ -134,7 +134,7 @@ def set_input_value(driver, element, value):
 
 
 def solve_acl_custom_captcha(driver, context_name="登录页"):
-    """专门定位并点击 'I am not a robot' 复选框"""
+    """精准定位并点击 'I am not a robot' 复选框"""
     print(f"  🛡️ 正在处理 [{context_name}] 的 'I am not a robot' 验证码...", flush=True)
     
     clicked = driver.execute_script("""
@@ -156,14 +156,14 @@ def solve_acl_custom_captcha(driver, context_name="登录页"):
     """)
 
     if clicked:
-        print(f"  👉 [{context_name}] 已派发物理事件点击验证码方框，等待 3 秒...", flush=True)
-        time.sleep(3)
+        print(f"  👉 [{context_name}] 已派发物理事件点击验证码方框，等待响应...", flush=True)
+        time.sleep(4)
     else:
         try:
             box_elem = driver.find_element(By.XPATH, "//*[contains(text(), 'not a robot')]/..")
             ActionChains(driver).move_to_element(box_elem).click().perform()
             print(f"  👉 [{context_name}] XPath 点击完成", flush=True)
-            time.sleep(3)
+            time.sleep(4)
         except Exception:
             pass
 
@@ -246,21 +246,20 @@ def main():
         expire_info_before = get_expire_info(driver)
         print(f"⏳ 续期前服务器状态: {expire_info_before}", flush=True)
 
-        # 3. 寻找并点击提示栏里的 Renew 按钮
+        # 3. 寻找提示栏里的 Renew 按钮
         renew_xpath = "//button[contains(., 'Renew') or contains(., 'Renouveler')]"
-        try:
-            driver.wait_for_element_visible(renew_xpath, by=By.XPATH, timeout=20)
-        except Exception:
-            pass
-
         renew_elements = driver.find_elements(By.XPATH, renew_xpath)
+        
+        now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+
         if not renew_elements:
-            print("ℹ️ 未检测到 Renew 按钮，可能未到续期时间", flush=True)
+            print("ℹ️ 当前未到续期时间（续期开放于到期前 2 天内）", flush=True)
             driver.save_screenshot("dashboard_status.png")
             tg_send(
                 f"ℹ️ <b>ACLClouds 状态巡检</b>\n\n"
                 f"⏳ <b>有效时间：</b><code>{html.escape(expire_info_before)}</code>\n"
-                f"📌 <b>状态：</b>无需续期或未开放",
+                f"📌 <b>续期状态：</b>未到操作窗口（到期前 2 天内开放）\n"
+                f"⏰ <b>巡检时间：</b><code>{now}</code>",
                 photo_path="dashboard_status.png"
             )
             return
@@ -272,10 +271,16 @@ def main():
             driver.execute_script("arguments[0].click();", renew_elements[0])
         time.sleep(3)
 
-        # 4. 处理弹出的 Anti-bot confirmation 对话框中的验证码
+        # 4. 处理 Anti-bot confirmation 弹窗
         print("🔍 检查 Anti-bot confirmation 弹窗...", flush=True)
         solve_acl_custom_captcha(driver, context_name="Anti-bot 弹窗")
-        time.sleep(4)
+
+        # 轮询等待弹窗关闭或请求完成
+        for _ in range(8):
+            dialog_open = driver.execute_script("return !!document.querySelector('div[role=\"dialog\"], .modal, .swal2-modal');")
+            if not dialog_open:
+                break
+            time.sleep(1)
 
         # 5. 刷新页面检查最新天数
         driver.refresh()
@@ -284,7 +289,6 @@ def main():
         expire_info_after = get_expire_info(driver)
         driver.save_screenshot("final_page.png")
 
-        now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
         tg_send(
             f"📋 <b>ACLClouds 自动续期汇总</b>\n\n"
             f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
