@@ -1,5 +1,6 @@
 import os
 import re
+import html
 import time
 import subprocess
 import requests
@@ -83,6 +84,37 @@ def start_gost(socks_proxy: str) -> subprocess.Popen:
     return proc
 
 
+def get_expire_info(page) -> str:
+    """提取页面到期信息"""
+    expire_info = "未知"
+    try:
+        body_text = page.inner_text("body").replace("\u00a0", " ").replace("\u202f", " ")
+        time_match = re.search(r'(?i)\b(\d+\s*[jd]\s*(?:\d+\s*[hm])?)\b', body_text)
+        if time_match:
+            expire_info = f"剩余 {time_match.group(1).strip()}"
+        else:
+            prefix_match = re.search(r'(?i)(?:EXPIRE\s*DANS|Expire\s*in|Échéance|Echeance)[\s:]*([^\n\r]+)', body_text)
+            if prefix_match:
+                expire_info = prefix_match.group(0).strip()
+    except Exception as e:
+        print(f"⚠️ 提取天数异常: {e}")
+    return expire_info
+
+
+def safe_start_server(page):
+    """安全尝试点击 Start 按钮，若 disabled 则跳过"""
+    try:
+        start_btn = page.locator("button.power-btn[data-variant='start'], button:has-text('Démarrer'), button:has-text('Start')").first
+        if start_btn.count() > 0 and start_btn.is_visible() and start_btn.is_enabled():
+            start_btn.click(timeout=3000)
+            print("  ⚡ 已点击 Start 按钮启动服务器...")
+            page.wait_for_timeout(4000)
+        else:
+            print("  ℹ️ 服务器无需启动或 Start 按钮不可用")
+    except Exception as e:
+        print(f"  ⚠️ 触发启动跳过: {e}")
+
+
 # ── 主逻辑 ─────────────────────────────────────────────────────
 def run(playwright):
     socks5_proxy = os.environ.get("SOCKS5_PROXY", "").strip()
@@ -124,7 +156,6 @@ def run(playwright):
         item = item.strip()
         if "=" in item:
             name, value = item.split("=", 1)
-            # 使用标准的 url 参数绑定，避免 Playwright 报 Invalid cookie fields
             cookies.append({
                 "name": name.strip(),
                 "value": value.strip(),
@@ -132,7 +163,6 @@ def run(playwright):
             })
     print(f"解析到 {len(cookies)} 个 Cookie")
 
-    # 注入 Cookie
     context.add_cookies(cookies)
     page = context.new_page()
 
@@ -153,32 +183,16 @@ def run(playwright):
 
         print(f"✅ 成功进入页面：{page.url}")
 
-        # ── 提取控制台页面中的剩余天数 / 到期信息 ──
-        expire_info = "未知"
-        try:
-            body_text = page.inner_text("body").replace("\u00a0", " ").replace("\u202f", " ")
-            
-            # 优先匹配倒计时模式（如 3j 23h, 4j, 12h, 3d 12h）
-            time_match = re.search(r'(?i)\b(\d+\s*[jd]\s*(?:\d+\s*[hm])?)\b', body_text)
-            if time_match:
-                expire_info = f"剩余 {time_match.group(1).strip()}"
-            else:
-                prefix_match = re.search(r'(?i)(?:EXPIRE\s*DANS|Expire\s*in|Échéance|Echeance)[\s:]*([^\n\r]+)', body_text)
-                if prefix_match:
-                    expire_info = prefix_match.group(0).strip()
-        except Exception as e:
-            print(f"⚠️ 提取天数异常: {e}")
-
+        expire_info = get_expire_info(page)
         print(f"⏳ 当前服务器到期状态：{expire_info}")
 
         # ── 查找 Renew / Reactivate 按钮 ──
-        renew_btns       = page.locator("button:has-text('Renew'), button:has-text('Renouveler'), a:has-text('Renew'), a:has-text('Renouveler')")
-        reactivate_btns  = page.locator("button:has-text('Reactivate'), button:has-text('Réactiver'), a:has-text('Reactivate'), a:has-text('Réactiver')")
-        renew_count      = renew_btns.count()
+        renew_btns = page.locator("button:has-text('Renew'), button:has-text('Renouveler'), a:has-text('Renew'), a:has-text('Renouveler')")
+        reactivate_btns = page.locator("button:has-text('Reactivate'), button:has-text('Réactiver'), a:has-text('Reactivate'), a:has-text('Réactiver')")
+        renew_count = renew_btns.count()
         reactivate_count = reactivate_btns.count()
         print(f"Renew 按钮：{renew_count}，Reactivate 按钮：{reactivate_count}")
 
-        # ── 读取服务器当前运行状态 ──
         status_el = page.locator(".mc-bar-status-text")
         server_status = status_el.inner_text().strip() if status_el.count() > 0 else "Online"
         print(f"⚡ 服务器当前运行状态：{server_status}")
@@ -186,20 +200,15 @@ def run(playwright):
         # ── 未到续期窗口 ──
         if renew_count == 0 and reactivate_count == 0:
             if server_status.lower() != "online":
-                print("⚠️ 检测到服务器 Offline，尝试点击 Start 启动...")
-                start_btn = page.locator("button.power-btn[data-variant='start'], button:has-text('Démarrer')")
-                if start_btn.count() > 0 and start_btn.is_visible():
-                    start_btn.click()
-                    page.wait_for_timeout(5000)
-                    server_status = "Offline，已尝试拉起启动"
+                safe_start_server(page)
 
             page.screenshot(path="dashboard_status.png", full_page=True)
             print(f"ℹ️ 未检测到 Renew / Reactivate 按钮（{expire_info}），发送状态通知并跳过。")
             
             tg_send(
                 f"ℹ️ <b>ACLClouds 状态巡检</b>\n\n"
-                f"⏳ <b>有效时间：</b><code>{expire_info}</code>\n"
-                f"⚡ <b>运行状态：</b><code>{server_status}</code>\n"
+                f"⏳ <b>有效时间：</b><code>{html.escape(expire_info)}</code>\n"
+                f"⚡ <b>运行状态：</b><code>{html.escape(server_status)}</code>\n"
                 f"📌 <b>续期状态：</b>未到操作窗口（到期前 2 天开放）",
                 photo_path="dashboard_status.png"
             )
@@ -214,42 +223,38 @@ def run(playwright):
         print(f"已点击 {action_name} 按钮，等待响应...")
         page.wait_for_timeout(4000)
 
-        action_ok = page.locator("text=/Server renewed successfully|renouvelé avec succès/i").count() > 0
-        action_text = "成功" if action_ok else "未确认"
+        # 刷新页面检查续期后状态与天数
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_timeout(4000)
 
-        # 刷新页面检查运行状态
-        page.reload()
-        page.wait_for_timeout(3000)
+        expire_info_after = get_expire_info(page)
         status_el = page.locator(".mc-bar-status-text")
         server_status = status_el.inner_text().strip() if status_el.count() > 0 else "unknown"
 
         if server_status.lower() != "online":
-            start_btn = page.locator("button.power-btn[data-variant='start'], button:has-text('Démarrer')")
-            if start_btn.count() > 0 and start_btn.is_visible():
-                start_btn.click()
-                print("已点击 Start 按钮启动服务器...")
-                page.wait_for_timeout(5000)
+            safe_start_server(page)
 
         page.screenshot(path="final_page.png", full_page=True)
         
         tg_send(
             f"📋 <b>ACLClouds 续期通知</b>\n\n"
-            f"✅ <b>{action_name}：</b>{action_text}\n"
-            f"⏳ <b>到期状态：</b><code>{expire_info}</code>\n"
-            f"⚡ <b>服务器状态：</b>{server_status}",
+            f"✅ <b>{action_name}：</b>操作已执行\n"
+            f"⏳ <b>最新到期状态：</b><code>{html.escape(expire_info_after)}</code>\n"
+            f"⚡ <b>服务器状态：</b><code>{html.escape(server_status)}</code>",
             photo_path="final_page.png",
         )
         print("\n任务执行完毕。")
 
     except Exception as e:
-        print(f"❌ 执行过程中发生错误: {e}")
+        err_msg = str(e)
+        print(f"❌ 执行过程中发生错误: {err_msg}")
         try:
             page.screenshot(path="dashboard_status.png", full_page=True)
         except Exception:
             pass
         tg_send(
             f"🔴 <b>ACLClouds 续期通知</b>\n\n"
-            f"❌ <b>脚本执行异常</b>：\n<code>{e}</code>",
+            f"❌ <b>脚本执行异常</b>：\n<code>{html.escape(err_msg)}</code>",
             photo_path="dashboard_status.png",
         )
     finally:
