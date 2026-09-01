@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动登录与服务器续期脚本 (物理指针过验版)
+# ACLClouds 自动登录与服务器续期脚本 (叶子节点精准点击版)
 # ============================================================
 import os
 import re
@@ -61,7 +61,7 @@ def tg_send(text: str, photo_path: str = None):
 def normalize_socks5_proxy(proxy_value: str) -> str:
     proxy_value = (proxy_value or "").strip()
     for prefix in ("socks5://", "socks://"):
-        if prefix.startswith(prefix):
+        if proxy_value.startswith(prefix):
             proxy_value = proxy_value[len(prefix):]
             break
     if not proxy_value or ":" not in proxy_value:
@@ -134,69 +134,46 @@ def set_input_value(driver, element, value):
 
 
 def solve_acl_custom_captcha(driver):
-    """通过物理鼠标动作点击并验证 ACLClouds 验证码方框"""
-    print("  🛡️ 正在物理定位并点击验证码复选框...", flush=True)
+    """精准定位底层的 'I am not a robot' 叶子节点与方框并点击"""
+    print("  🛡️ 正在精准定位验证码复选框...", flush=True)
     
-    box_rect = driver.execute_script("""
-        const allNodes = Array.from(document.querySelectorAll('*'));
-        const robotLabel = allNodes.find(el => {
-            const t = (el.innerText || el.textContent || '').trim();
-            return t.includes('I am not a robot') || t.includes('not a robot');
+    # 查找最底层的文本节点所在的最小父容器
+    target_found = driver.execute_script("""
+        // 查找直接包含 'not a robot' 且子节点最少的最深层节点
+        const candidates = Array.from(document.querySelectorAll('*')).filter(el => {
+            const txt = (el.innerText || el.textContent || '').trim();
+            return txt.includes('not a robot') && el.children.length <= 3 && el.clientHeight < 100;
         });
-        if (robotLabel) {
-            // 获取该行的左侧正方形区域
-            const rect = robotLabel.getBoundingClientRect();
-            return {
-                x: rect.left + 25, // 点击该行最左侧的复选框中心
-                y: rect.top + rect.height / 2,
-                width: rect.width,
-                height: rect.height
-            };
-        }
-        return null;
+
+        if (candidates.length === 0) return false;
+        
+        // 取最小的那个容器
+        const targetContainer = candidates[0];
+        
+        // 优先在容器内寻找可点击元素，若无则取容器本身
+        const clickable = targetContainer.querySelector('input, span, div, svg') || targetContainer;
+        clickable.scrollIntoView({ block: 'center' });
+
+        // 派发全套鼠标物理事件
+        ['mouseover', 'mouseenter', 'mousedown', 'mouseup', 'click'].forEach(evtType => {
+            clickable.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
+        });
+        
+        return true;
     """)
 
-    if box_rect:
-        try:
-            # 1. 使用 ActionChains 执行真实物理光标移动并点击
-            actions = ActionChains(driver)
-            actions.move_by_offset(int(box_rect["x"]), int(box_rect["y"])).click().perform()
-            # 还原光标偏移
-            actions.move_by_offset(-int(box_rect["x"]), -int(box_rect["y"])).perform()
-        except Exception:
-            pass
-
-        # 2. 补发真实 Pointer + Mouse 事件链
-        driver.execute_script("""
-            const allNodes = Array.from(document.querySelectorAll('*'));
-            const robotLabel = allNodes.find(el => (el.innerText || el.textContent || '').includes('not a robot'));
-            if (robotLabel) {
-                const target = robotLabel.querySelector('input, span, div, svg') || robotLabel;
-                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
-                    target.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
-                });
-            }
-        """)
-
-        # 3. 轮询等待 8 秒，确认验证码是否被打勾或通过
-        for _ in range(8):
-            time.sleep(1)
-            verified = driver.execute_script("""
-                const robotLabel = Array.from(document.querySelectorAll('*')).find(el => (el.innerText || el.textContent || '').includes('not a robot'));
-                if (!robotLabel) return false;
-                const html = robotLabel.innerHTML || '';
-                return html.includes('check') || html.includes('svg') || html.includes('verified') || robotLabel.className.includes('checked');
-            """)
-            if verified:
-                print("  ✅ 验证码已成功勾选并通过！", flush=True)
-                break
-    else:
-        print("  ⚠️ 未能获取到验证码坐标，尝试系统辅助点击...", flush=True)
-        try:
-            driver.uc_gui_click_captcha()
-        except Exception:
-            pass
+    if target_found:
+        print("  👉 已命中底层验证码方框并派发点击事件，等待 3 秒...", flush=True)
         time.sleep(3)
+    else:
+        # XPath 备选定位
+        try:
+            box_elem = driver.find_element(By.XPATH, "//*[contains(text(), 'not a robot')]/..")
+            ActionChains(driver).move_to_element(box_elem).click().perform()
+            print("  👉 XPath 定位成功并点击", flush=True)
+            time.sleep(3)
+        except Exception:
+            pass
 
 
 def main():
@@ -236,14 +213,12 @@ def main():
         print("  📝 已填入密码", flush=True)
         time.sleep(1)
 
-        # 物理点击并等待验证码
+        # 点击验证码
         solve_acl_custom_captcha(driver)
         time.sleep(2)
 
         print("🔑 正在点击 [Sign in] 按钮提交登录...", flush=True)
         submit_btn = driver.find_element(By.XPATH, "//button[contains(., 'Sign in') or contains(., 'Login') or contains(., 'Connexion') or @type='submit']")
-        
-        # 模拟物理点击提交按钮
         try:
             submit_btn.click()
         except Exception:
