@@ -157,19 +157,14 @@ def run(playwright):
     context.add_cookies(cookies)
     page = context.new_page()
 
-    # 监听点击产生的所有网络请求
     network_logs = []
-    def log_request(req):
-        if any(k in req.url.lower() for k in ["renew", "server", "api", "extension"]):
-            network_logs.append(f"REQ -> {req.method} {req.url}")
     def log_response(res):
         if any(k in res.url.lower() for k in ["renew", "server", "api", "extension"]):
             try:
-                network_logs.append(f"RES <- [{res.status}] {res.url} : {res.text()[:80]}")
+                network_logs.append(f"[{res.status}] {res.url.split('?')[0]}")
             except Exception:
                 pass
 
-    page.on("request", log_request)
     page.on("response", log_response)
 
     try:
@@ -192,85 +187,72 @@ def run(playwright):
         expire_info_before = get_expire_info(page)
         print(f"⏳ 续期前服务器到期状态：{expire_info_before}")
 
-        # ── 深度探测顶部横条 Renew 按钮属性 ──
-        button_debug_info = page.evaluate("""
+        # ── 1. 定位顶部横条中的黑色 Renew 按钮 ──
+        button_info = page.evaluate("""
             () => {
-                const elList = Array.from(document.querySelectorAll('button, a, div, span'));
-                const target = elList.find(el => {
-                    const txt = (el.innerText || el.textContent || '').trim();
-                    return txt === 'Renew' || txt.includes('Renew') || txt.includes('Renouveler');
+                // 遍历所有可能的按钮与可点击元素
+                const candidates = Array.from(document.querySelectorAll('button, a, div[role="button"], span[role="button"]'));
+                
+                // 寻找文本严格包含 Renew/Renouveler 且不是大容器的叶子/小组件节点
+                const match = candidates.find(el => {
+                    const txt = el.innerText ? el.innerText.trim() : '';
+                    const isRenew = txt.toLowerCase().includes('renew') || txt.toLowerCase().includes('renouveler');
+                    const isSmall = el.clientWidth < 300 && el.clientHeight < 100;
+                    return isRenew && isSmall && el.id !== 'app';
                 });
-                if (!target) return null;
-                const rect = target.getBoundingClientRect();
+
+                if (!match) return null;
+                const rect = match.getBoundingClientRect();
                 return {
-                    tagName: target.tagName,
-                    href: target.getAttribute('href'),
-                    className: target.className,
-                    id: target.id,
+                    tagName: match.tagName,
+                    text: match.innerText.trim(),
                     x: rect.x + rect.width / 2,
                     y: rect.y + rect.height / 2,
-                    outerHTML: target.outerHTML.slice(0, 300)
+                    outerHTML: match.outerHTML.slice(0, 200)
                 };
             }
         """)
 
-        print(f"🔍 Renew 按钮 DOM 结构: {button_debug_info}")
+        print(f"🔍 真实 Renew 按钮定位结果: {button_info}")
 
-        if not button_debug_info:
-            print("⚠️ 未能在页面找到包含 Renew 文本的元素")
+        if not button_info:
+            print("⚠️ 未能在提示栏中定位到独立的 Renew 按钮")
             tg_send(
                 f"ℹ️ <b>ACLClouds 状态巡检</b>\n\n"
                 f"⏳ <b>有效时间：</b><code>{html.escape(expire_info_before)}</code>\n"
-                f"📌 <b>未检测到 Renew 按钮</b>",
-                photo_path="final_page.png"
+                f"📌 <b>未找到可点击的 Renew 按钮</b>",
+                photo_path="dashboard_status.png"
             )
             return
 
-        # ── 1. 若是超链接跳转，则执行链接；若是按钮，使用物理坐标点击 ──
-        if button_debug_info.get("href") and button_debug_info["href"] != "#":
-            target_href = button_debug_info["href"]
-            if not target_href.startswith("http"):
-                target_href = f"https://aclclouds.com{target_href}"
-            print(f"👉 发现超链接跳转: {target_href}，直接访问...")
-            page.goto(target_href, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
-        else:
-            click_x = button_debug_info["x"]
-            click_y = button_debug_info["y"]
-            print(f"👉 使用物理绝对坐标点击 Renew 按钮: ({click_x}, {click_y}) ...")
-            page.mouse.move(click_x, click_y)
-            page.wait_for_timeout(200)
-            page.mouse.down()
-            page.wait_for_timeout(100)
-            page.mouse.up()
-            page.wait_for_timeout(3000)
-
-        # 截图保存点击后的即时状态
-        page.screenshot(path="after_click.png", full_page=False)
-
-        # ── 2. 处理可能出现的弹窗/对话框/确认框 ──
-        confirm_selectors = [
-            ".swal2-confirm",
-            "button.swal2-confirm",
-            "button:has-text('Confirm')",
-            "button:has-text('Confirmer')",
-            "button:has-text('Yes')",
-            "button:has-text('Submit')",
-            "button[type='submit']",
-            "div[role='dialog'] button"
-        ]
-        for sel in confirm_selectors:
-            btn = page.locator(sel).first
-            if btn.count() > 0 and btn.is_visible():
-                print(f"👉 捕获到弹窗内按钮: {sel}，正在点击...")
-                btn.click()
-                page.wait_for_timeout(3000)
-                break
-
+        # ── 2. 真实物理点击定位到的 Renew 按钮 ──
+        target_x = button_info["x"]
+        target_y = button_info["y"]
+        print(f"👉 鼠标移动并物理点击真实按钮坐标: ({target_x}, {target_y}) ...")
+        
+        page.mouse.move(target_x, target_y)
+        page.wait_for_timeout(300)
+        page.mouse.click(target_x, target_y)
         page.wait_for_timeout(3000)
 
-        # ── 3. 刷新页面检查最新到期状态 ──
-        page.goto(SERVER_CONSOLE_URL, wait_until="domcontentloaded")
+        # ── 3. 检测是否弹出二次确认框/模态框 ──
+        modal_clicked = page.evaluate("""
+            () => {
+                const modalBtns = Array.from(document.querySelectorAll('.swal2-confirm, div[role="dialog"] button, .modal button'));
+                const confirmBtn = modalBtns.find(b => b.offsetWidth > 0 && b.offsetHeight > 0);
+                if (confirmBtn) {
+                    confirmBtn.click();
+                    return true;
+                }
+                return false;
+            }
+        """)
+        if modal_clicked:
+            print("👉 已点击弹窗确认按钮！")
+            page.wait_for_timeout(3000)
+
+        # ── 4. 刷新页面验证续期结果 ──
+        page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(4000)
 
         expire_info_after = get_expire_info(page)
@@ -279,16 +261,16 @@ def run(playwright):
 
         page.screenshot(path="final_page.png", full_page=True)
 
-        logs_summary = "\n".join(network_logs[-4:]) if network_logs else "无网络请求触发"
-        print(f"📡 网络日志摘要:\n{logs_summary}")
+        logs_summary = "\n".join(network_logs[-3:]) if network_logs else "无相关接口触发"
+        print(f"📡 捕获网络日志: {logs_summary}")
 
         tg_send(
-            f"📋 <b>ACLClouds 续期执行结果</b>\n\n"
+            f"📋 <b>ACLClouds 续期结果反馈</b>\n\n"
             f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
             f"⚡ <b>服务器状态：</b><code>{html.escape(server_status)}</code>\n"
-            f"🔍 <b>按钮标签：</b><code>{html.escape(str(button_debug_info.get('tagName')))}</code>\n"
-            f"📡 <b>网络触发：</b>\n<code>{html.escape(logs_summary[:300])}</code>",
-            photo_path="after_click.png" if os.path.exists("after_click.png") else "final_page.png",
+            f"🎯 <b>点击坐标：</b><code>({target_x:.1f}, {target_y:.1f})</code>\n"
+            f"📡 <b>接口响应：</b>\n<code>{html.escape(logs_summary)}</code>",
+            photo_path="final_page.png",
         )
         print(f"\n任务执行完毕，最新状态: {expire_info_after}")
 
