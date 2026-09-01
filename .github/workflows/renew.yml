@@ -1,17 +1,15 @@
-name: ACLClouds Auto Renew
+name: ACLClouds Renew
 
 on:
-  repository_dispatch:
-    types: [googlecloud-trigger]
-  workflow_dispatch:
   schedule:
-    - cron: '0 0,12 * * *'
+    - cron: '0 */12 * * *'  # 每 12 小时检查一次
+  workflow_dispatch:
 
 jobs:
-  renew-job:
+  renew:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -19,39 +17,24 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install gost
+      - name: Install Dependencies
         run: |
-          set -euo pipefail
-          GOST_VER="2.12.0"
-          URL="https://github.com/ginuerzh/gost/releases/download/v${GOST_VER}/gost_${GOST_VER}_linux_amd64.tar.gz"
+          sudo apt-get update
+          sudo apt-get install -y xvfb wget
+          pip install seleniumbase requests
 
-          echo "Downloading gost from: $URL"
-          curl -fL "$URL" -o gost.tar.gz
-          tar -xzf gost.tar.gz
-          chmod +x gost
-          sudo mv gost /usr/local/bin/gost
-
-          which gost
-          gost -V
-
-      - name: Install dependencies
+      - name: Install gost (Proxy)
         run: |
-          python -m pip install --upgrade pip
-          pip install playwright requests
-          playwright install --with-deps chromium
+          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+          gunzip gost-linux-amd64-2.11.5.gz
+          chmod +x gost-linux-amd64-2.11.5
+          sudo mv gost-linux-amd64-2.11.5 /usr/local/bin/gost
 
       - name: Run Renew Script
         env:
           ACL_COOKIES: ${{ secrets.ACL_COOKIES }}
+          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
-        run: python renew.py
-
-      - name: Upload Screenshot
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: Debug-Screenshots
-          path: "*.png"
-          retention-days: 5
+        run: |
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python -u renew.py
