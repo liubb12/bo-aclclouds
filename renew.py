@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# ============================================================
+# ACLClouds 自动登录与服务器续期脚本 (SeleniumBase UC 版)
+# ============================================================
 import os
 import re
 import html
@@ -10,16 +13,21 @@ import requests
 from datetime import datetime, timezone, timedelta
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 
+BASE_URL = "https://aclclouds.com"
+LOGIN_URL = f"{BASE_URL}/auth/login"
+SERVER_ID = "75e19d55"
+SERVER_CONSOLE_URL = f"{BASE_URL}/server/{SERVER_ID}"
+
+LOCAL_HTTP_PORT = 18080
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
-LOCAL_HTTP_PORT = 18080
+ACL_USERNAME = os.environ.get("ACL_USERNAME", "").strip()
+ACL_PASSWORD = os.environ.get("ACL_PASSWORD", "").strip()
+SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 
-SERVER_ID = "75e19d55"
-SERVER_CONSOLE_URL = f"https://aclclouds.com/server/{SERVER_ID}"
 
-
-# ── Telegram 通知 ──────────────────────────────────────────────
 def tg_send(text: str, photo_path: str = None):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("⚠️ 未配置 TG_BOT_TOKEN / TG_CHAT_ID，跳过通知。")
@@ -49,7 +57,6 @@ def tg_send(text: str, photo_path: str = None):
         print(f"  ⚠️ TG 通知异常: {e}")
 
 
-# ── gost 代理 ──────────────────────────────────────────────────
 def normalize_socks5_proxy(proxy_value: str) -> str:
     proxy_value = (proxy_value or "").strip()
     for prefix in ("socks5://", "socks://"):
@@ -69,7 +76,7 @@ def wait_http_proxy_ready(port: int, timeout: int = 15):
         try:
             resp = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=8)
             if resp.ok:
-                print("✅ 本地 HTTP 代理连通性测试成功")
+                print("  ✅ 本地 HTTP 代理连通性测试成功")
                 return
         except Exception as e:
             last_error = e
@@ -80,14 +87,37 @@ def wait_http_proxy_ready(port: int, timeout: int = 15):
 def start_gost(socks_proxy: str) -> subprocess.Popen:
     normalized = normalize_socks5_proxy(socks_proxy)
     cmd = ["gost", "-L", f"http://127.0.0.1:{LOCAL_HTTP_PORT}", "-F", f"socks5://{normalized}"]
-    print("启动 gost 代理...")
+    print("  🚀 启动 gost 代理中转...")
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(2)
     if proc.poll() is not None:
         raise RuntimeError("gost 启动失败，请检查 SOCKS5_PROXY 格式和 gost 安装。")
     wait_http_proxy_ready(LOCAL_HTTP_PORT)
-    print(f"✅ gost 已启动，本地 HTTP 代理端口：{LOCAL_HTTP_PORT}")
+    print(f"  ✅ gost 已启动，本地代理端口：{LOCAL_HTTP_PORT}")
     return proc
+
+
+def solve_turnstile(driver, max_wait=20):
+    """检测并物理点击 Cloudflare Turnstile 验证框"""
+    for i in range(max_wait):
+        try:
+            token = driver.execute_script("""
+                const el = document.querySelector('input[name="cf-turnstile-response"]');
+                return el ? el.value : null;
+            """)
+            if token and len(token) > 20:
+                print("  🛡️ Turnstile 验证已顺利通过！", flush=True)
+                return True
+        except Exception:
+            pass
+
+        if i % 2 == 0:
+            try:
+                driver.uc_gui_click_captcha()
+            except Exception:
+                pass
+        time.sleep(1)
+    return False
 
 
 def get_expire_info(driver) -> str:
@@ -108,85 +138,106 @@ def get_expire_info(driver) -> str:
 
 
 def main():
-    socks5_proxy = os.environ.get("SOCKS5_PROXY", "").strip()
+    if not ACL_USERNAME or not ACL_PASSWORD:
+        print("❌ 未在 Secrets 中配置 ACL_USERNAME 或 ACL_PASSWORD", flush=True)
+        return
+
     gost_proc = None
     uc_proxy = None
 
-    if socks5_proxy:
+    if SOCKS5_PROXY:
         try:
-            gost_proc = start_gost(socks5_proxy)
+            gost_proc = start_gost(SOCKS5_PROXY)
             uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
-            print("✅ 浏览器将通过代理访问。")
+            print("🔗 代理检测正常，已启用中转。")
         except Exception as e:
-            print(f"⚠️ 代理启动失败：{e}，将直接连接。")
+            print(f"⚠️ 代理启动失败：{e}，将尝试直连。")
 
-    raw_cookies = os.environ.get("ACL_COOKIES", "").strip()
-    if not raw_cookies:
-        print("❌ 未找到 ACL_COOKIES 环境变量。")
-        tg_send("🔴 <b>ACLClouds 续期通知</b>\n\n❌ 未找到 ACL_COOKIES 环境变量。")
-        if gost_proc:
-            gost_proc.terminate()
-        return
-
-    # 启动真实桌面的 Chrome (UC 模式)
     driver = Driver(uc=True, headless=False, proxy=uc_proxy)
 
     try:
-        print("🌐 正在初始化访问 ACLClouds 域名...")
-        driver.uc_open_with_reconnect("https://aclclouds.com", reconnect_time=4)
+        # 1. 登录页面
+        print(f"🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
+        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
+        time.sleep(3)
+
+        user_selector = "input[name='user'], input[name='username'], input[name='email'], input[type='text'], input[type='email']"
+        driver.wait_for_element_visible(user_selector, timeout=25)
+
+        user_elem = driver.find_element(By.CSS_SELECTOR, user_selector)
+        user_elem.click()
+        user_elem.clear()
+        user_elem.send_keys(ACL_USERNAME)
+        time.sleep(1)
+
+        pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
+        pwd_elem.click()
+        pwd_elem.clear()
+        pwd_elem.send_keys(ACL_PASSWORD)
+        time.sleep(1)
+
+        print("🛡️ 正在进行登录页 Turnstile 人机验证与物理点击...", flush=True)
+        solve_turnstile(driver, max_wait=20)
         time.sleep(2)
 
-        # 注入 Cookie
-        normalized = raw_cookies.replace("\n", ";").replace("\r", "")
-        for item in normalized.split(";"):
-            item = item.strip()
-            if "=" in item:
-                name, value = item.split("=", 1)
-                driver.add_cookie({
-                    "name": name.strip(),
-                    "value": value.strip(),
-                    "domain": "aclclouds.com",
-                    "path": "/"
-                })
-        print("✅ Cookie 注入完成，打开服务器控制台...")
+        print("🔑 正在提交登录...", flush=True)
+        try:
+            submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+            driver.execute_script("arguments[0].click();", submit_btn)
+        except Exception:
+            pwd_elem.send_keys(Keys.RETURN)
 
-        driver.get(SERVER_CONSOLE_URL)
-        time.sleep(5)
+        for _ in range(12):
+            if "/auth/login" not in driver.current_url:
+                break
+            time.sleep(1)
 
-        if "login" in driver.current_url or "signin" in driver.current_url:
-            print("❌ Cookie 未生效，重定向到登录页。")
-            driver.save_screenshot("dashboard_status.png")
+        if "/auth/login" in driver.current_url:
+            driver.save_screenshot("login_failed.png")
+            print("❌ 登录未成功跳转，停留在登录页", flush=True)
             tg_send(
-                "🔴 <b>ACLClouds 续期通知</b>\n\n"
-                "❌ <b>登录失败</b>：Cookie 已过期，请重新获取并更新 Secret。",
-                photo_path="dashboard_status.png",
+                "🔴 <b>ACLClouds 续期通知</b>\n\n❌ <b>登录失败</b>：用户名或密码错误，或人机验证未通过。",
+                photo_path="login_failed.png"
             )
             return
 
-        print(f"✅ 成功进入页面：{driver.current_url}")
+        print(f"✅ 登录成功！当前页面: {driver.current_url}", flush=True)
+
+        # 2. 访问服务器控制台
+        print(f"🔄 打开服务器控制台: {SERVER_CONSOLE_URL} ...", flush=True)
+        driver.get(SERVER_CONSOLE_URL)
+        time.sleep(5)
 
         expire_info_before = get_expire_info(driver)
-        print(f"⏳ 续期前服务器到期状态：{expire_info_before}")
+        print(f"⏳ 续期前服务器状态: {expire_info_before}", flush=True)
 
-        # 查找提示条里的 Renew 按钮并使用 UC 模式物理点击
+        # 3. 寻找并点击提示栏里的 Renew 按钮
         renew_xpath = "//button[contains(., 'Renew') or contains(., 'Renouveler')]"
-        driver.wait_for_element_visible(renew_xpath, by=By.XPATH, timeout=20)
-        renew_btn = driver.find_element(By.XPATH, renew_xpath)
-
-        print("👉 在真实桌面中物理点击 Renew 按钮...")
         try:
-            renew_btn.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", renew_btn)
-        time.sleep(3)
-
-        # 如果有弹窗或 Cloudflare 验证，直接处理
-        try:
-            driver.uc_gui_click_captcha()
+            driver.wait_for_element_visible(renew_xpath, by=By.XPATH, timeout=20)
         except Exception:
             pass
 
-        # 检查并点击弹窗确认按钮
+        renew_elements = driver.find_elements(By.XPATH, renew_xpath)
+        if not renew_elements:
+            print("ℹ️ 未检测到 Renew 按钮，可能未到续期时间", flush=True)
+            driver.save_screenshot("dashboard_status.png")
+            tg_send(
+                f"ℹ️ <b>ACLClouds 状态巡检</b>\n\n"
+                f"⏳ <b>有效时间：</b><code>{html.escape(expire_info_before)}</code>\n"
+                f"📌 <b>状态：</b>无需续期或未开放",
+                photo_path="dashboard_status.png"
+            )
+            return
+
+        print("👉 物理真实点击 Renew 按钮...", flush=True)
+        try:
+            renew_elements[0].click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", renew_elements[0])
+        time.sleep(3)
+
+        # 4. 检测并确认弹窗
         modal_clicked = driver.execute_script("""
             const modalBtns = Array.from(document.querySelectorAll('.swal2-confirm, div[role="dialog"] button, .modal button'));
             for (let b of modalBtns) {
@@ -198,10 +249,10 @@ def main():
             return false;
         """)
         if modal_clicked:
-            print("👉 已点击弹窗确认按钮！")
+            print("👉 已点击弹窗确认按钮！", flush=True)
             time.sleep(3)
 
-        # 刷新页面验证最新天数
+        # 5. 刷新页面检查最新天数
         driver.refresh()
         time.sleep(4)
 
@@ -210,23 +261,23 @@ def main():
 
         now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
         tg_send(
-            f"📋 <b>ACLClouds 续期执行结果 (真实浏览器版)</b>\n\n"
+            f"📋 <b>ACLClouds 自动续期汇总</b>\n\n"
             f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
             f"⏰ <b>执行时间：</b><code>{now}</code>",
             photo_path="final_page.png",
         )
-        print(f"\n任务执行完毕，最新状态: {expire_info_after}")
+        print(f"\n✅ 任务执行完毕，最新状态: {expire_info_after}", flush=True)
 
     except Exception as e:
         err_msg = str(e)
-        print(f"❌ 执行异常: {err_msg}")
+        print(f"❌ 执行异常: {err_msg}", flush=True)
         try:
-            driver.save_screenshot("dashboard_status.png")
+            driver.save_screenshot("error.png")
         except Exception:
             pass
         tg_send(
             f"🔴 <b>ACLClouds 续期通知</b>\n\n❌ <b>脚本执行异常</b>：\n<code>{html.escape(err_msg)}</code>",
-            photo_path="dashboard_status.png",
+            photo_path="error.png",
         )
     finally:
         driver.quit()
