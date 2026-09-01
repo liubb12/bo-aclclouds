@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动登录与服务器续期脚本 (强化交互版)
+# ACLClouds 自动登录与服务器续期脚本 (ACL 自定义验证码适配版)
 # ============================================================
 import os
 import re
@@ -97,29 +97,6 @@ def start_gost(socks_proxy: str) -> subprocess.Popen:
     return proc
 
 
-def solve_turnstile(driver, max_wait=20):
-    """检测并物理点击 Cloudflare Turnstile 验证框"""
-    for i in range(max_wait):
-        try:
-            token = driver.execute_script("""
-                const el = document.querySelector('input[name="cf-turnstile-response"]');
-                return el ? el.value : null;
-            """)
-            if token and len(token) > 20:
-                print("  🛡️ Turnstile 验证已顺利通过！", flush=True)
-                return True
-        except Exception:
-            pass
-
-        if i % 2 == 0:
-            try:
-                driver.uc_gui_click_captcha()
-            except Exception:
-                pass
-        time.sleep(1)
-    return False
-
-
 def get_expire_info(driver) -> str:
     """提取页面到期信息"""
     expire_info = "未知"
@@ -137,21 +114,54 @@ def get_expire_info(driver) -> str:
     return expire_info
 
 
-def set_react_input(driver, element, value):
-    """通过 React 原生 setter 强写入表单值，确保触发状态绑定"""
-    driver.execute_script("""
-        const el = arguments[0];
-        const val = arguments[1];
-        const lastValue = el.value;
-        el.value = val;
-        const event = new Event('input', { bubbles: true });
-        const tracker = el._valueTracker;
-        if (tracker) {
-            tracker.setValue(lastValue);
+def set_input_value(driver, element, value):
+    """模拟人类逐字输入并触发 React 事件"""
+    try:
+        element.click()
+        time.sleep(0.2)
+        element.send_keys(Keys.CONTROL, "a")
+        element.send_keys(Keys.BACKSPACE)
+        for ch in value:
+            element.send_keys(ch)
+            time.sleep(0.02)
+        driver.execute_script("""
+            const el = arguments[0];
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        """, element)
+    except Exception:
+        pass
+
+
+def solve_acl_custom_captcha(driver):
+    """专门定位并点击 ACLClouds 自定义的 'I am not a robot' 复选框"""
+    print("  🛡️ 正在寻找并点击 'I am not a robot' 验证码复选框...", flush=True)
+    clicked = driver.execute_script("""
+        // 查找包含 I am not a robot 的元素或其内部的 checkbox/svg/span
+        const allElements = Array.from(document.querySelectorAll('div, span, p, label, input[type="checkbox"]'));
+        const robotLabel = allElements.find(el => {
+            const txt = (el.innerText || el.textContent || '').trim();
+            return txt.includes('I am not a robot') || txt.includes('not a robot');
+        });
+
+        if (robotLabel) {
+            // 优先查找其内部或兄弟节点的可点击方框
+            const box = robotLabel.querySelector('input[type="checkbox"], span, div, svg') || robotLabel;
+            box.click();
+            return true;
         }
-        el.dispatchEvent(event);
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-    """, element, value)
+        return false;
+    """)
+    if clicked:
+        print("  👉 已点击验证码复选框，等待响应 3 秒...", flush=True)
+        time.sleep(3)
+    else:
+        print("  ⚠️ 未直接匹配到验证码文字，尝试通用 Captcha 破解...", flush=True)
+        try:
+            driver.uc_gui_click_captcha()
+        except Exception:
+            pass
+        time.sleep(2)
 
 
 def main():
@@ -175,40 +185,33 @@ def main():
     try:
         # 1. 登录页面
         print(f"🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
-        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
-        time.sleep(3)
+        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
+        time.sleep(4)
 
-        # 查找输入框
         user_selector = "input[name='user'], input[name='username'], input[name='email'], input[type='text'], input[type='email']"
         driver.wait_for_element_visible(user_selector, timeout=25)
 
         user_elem = driver.find_element(By.CSS_SELECTOR, user_selector)
-        user_elem.click()
-        user_elem.clear()
-        user_elem.send_keys(ACL_USERNAME)
-        set_react_input(driver, user_elem, ACL_USERNAME)
+        set_input_value(driver, user_elem, ACL_USERNAME)
+        print(f"  📝 已填入账号: {ACL_USERNAME[:3]}***", flush=True)
         time.sleep(1)
 
         pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
-        pwd_elem.click()
-        pwd_elem.clear()
-        pwd_elem.send_keys(ACL_PASSWORD)
-        set_react_input(driver, pwd_elem, ACL_PASSWORD)
+        set_input_value(driver, pwd_elem, ACL_PASSWORD)
+        print("  📝 已填入密码", flush=True)
         time.sleep(1)
 
-        print("🛡️ 正在进行登录页 Turnstile 人机验证与物理点击...", flush=True)
-        solve_turnstile(driver, max_wait=20)
-        time.sleep(2)
+        # 点击自定义验证码
+        solve_acl_custom_captcha(driver)
 
-        print("🔑 正在提交登录...", flush=True)
+        print("🔑 正在点击 [Sign in] 按钮提交登录...", flush=True)
         try:
-            submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], button:has-text('Login'), button:has-text('Connexion')")
+            submit_btn = driver.find_element(By.XPATH, "//button[contains(., 'Sign in') or contains(., 'Login') or contains(., 'Connexion') or @type='submit']")
             driver.execute_script("arguments[0].click();", submit_btn)
         except Exception:
             pwd_elem.send_keys(Keys.RETURN)
 
-        # 等待跳转
-        for _ in range(12):
+        for _ in range(15):
             if "/auth/login" not in driver.current_url:
                 break
             time.sleep(1)
@@ -216,10 +219,11 @@ def main():
         if "/auth/login" in driver.current_url:
             driver.save_screenshot("login_failed.png")
             body_text = driver.get_text("body")
-            err_hint = "页面未跳转"
+            err_hint = "登录验证失败"
             for line in body_text.split("\n"):
-                if any(k in line.lower() for k in ["invalid", "incorrect", "password", "captcha", "turnstile", "erreur", "mot de passe"]):
-                    err_hint = line.strip()
+                line_str = line.strip()
+                if line_str and any(k in line_str.lower() for k in ["invalid", "incorrect", "password", "captcha", "erreur", "mot de passe", "not found"]):
+                    err_hint = line_str
                     break
             print(f"❌ 登录未成功跳转，页面提示: {err_hint}", flush=True)
             tg_send(
