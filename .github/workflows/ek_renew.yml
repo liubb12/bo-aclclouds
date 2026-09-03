@@ -21,18 +21,26 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y xvfb wget
 
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
           pip install seleniumbase requests
 
+      - name: Install gost (Proxy)
+        run: |
+          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+          gzip -d gost-linux-amd64-2.11.5.gz
+          chmod +x gost-linux-amd64-2.11.5
+          sudo mv gost-linux-amd64-2.11.5 /usr/local/bin/gost
+
       - name: Run EKNodes Renew Script
         env:
           EK_EMAIL: ${{ secrets.EK_EMAIL }}
           EK_USERNAME: ${{ secrets.EK_USERNAME }}
           EK_PASSWORD: ${{ secrets.EK_PASSWORD }}
+          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
