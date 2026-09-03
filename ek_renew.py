@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动登录与服务器续期脚本 (高拟真真人行为模拟版)
+# EKNodes 自动登录与服务器续期脚本 (代理 + CF 盾牌穿透增强版)
 # ============================================================
 import os
 import re
 import html
 import time
 import random
+import subprocess
 import requests
 from datetime import datetime, timezone, timedelta
 from seleniumbase import Driver
@@ -19,16 +20,17 @@ BASE_URL = "https://dash.eknodes.es"
 LOGIN_URL = f"{BASE_URL}/login"
 SERVERS_URL = f"{BASE_URL}/servers"
 
+LOCAL_HTTP_PORT = 18080
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 
 EK_EMAIL = os.environ.get("EK_EMAIL", "").strip()
 EK_USERNAME = os.environ.get("EK_USERNAME", "").strip()
 EK_PASSWORD = os.environ.get("EK_PASSWORD", "").strip()
+SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 
 
 def human_sleep(min_s=1.0, max_s=2.5):
-    """真人操作间的随机呼吸停顿"""
     time.sleep(random.uniform(min_s, max_s))
 
 
@@ -57,8 +59,47 @@ def tg_send(text: str, photo_path: str = None):
         print(f"  ⚠️ TG 通知异常: {e}")
 
 
+def normalize_socks5_proxy(proxy_value: str) -> str:
+    proxy_value = (proxy_value or "").strip()
+    for prefix in ("socks5://", "socks://"):
+        if proxy_value.startswith(prefix):
+            proxy_value = proxy_value[len(prefix):]
+            break
+    if not proxy_value or ":" not in proxy_value:
+        raise ValueError("SOCKS5_PROXY 格式错误，应为 host:port 或 user:pass@host:port。")
+    return proxy_value
+
+
+def wait_http_proxy_ready(port: int, timeout: int = 15):
+    proxies = {"http": f"http://127.0.0.1:{port}", "https": f"http://127.0.0.1:{port}"}
+    last_error = None
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            resp = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=8)
+            if resp.ok:
+                print("  ✅ 本地 HTTP 代理连通性测试成功")
+                return
+        except Exception as e:
+            last_error = e
+        time.sleep(1)
+    raise RuntimeError(f"本地 HTTP 代理就绪检测失败: {last_error}")
+
+
+def start_gost(socks_proxy: str) -> subprocess.Popen:
+    normalized = normalize_socks5_proxy(socks_proxy)
+    cmd = ["gost", "-L", f"http://127.0.0.1:{LOCAL_HTTP_PORT}", "-F", f"socks5://{normalized}"]
+    print("  🚀 启动 gost 代理中转...")
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+    if proc.poll() is not None:
+        raise RuntimeError("gost 启动失败，请检查 SOCKS5_PROXY 格式和 gost 安装。")
+    wait_http_proxy_ready(LOCAL_HTTP_PORT)
+    print(f"  ✅ gost 已启动，本地代理端口：{LOCAL_HTTP_PORT}")
+    return proc
+
+
 def human_type(driver, element, text: str):
-    """模拟真人打字：物理聚焦、随机击键延时、分发输入事件"""
     try:
         ActionChains(driver).move_to_element(element).pause(random.uniform(0.1, 0.3)).click().perform()
         human_sleep(0.2, 0.4)
@@ -82,7 +123,6 @@ def human_type(driver, element, text: str):
 
 
 def human_click(driver, element):
-    """模拟真人鼠标移动到目标元素并点击"""
     try:
         driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", element)
         human_sleep(0.3, 0.6)
@@ -91,40 +131,41 @@ def human_click(driver, element):
         driver.execute_script("arguments[0].click();", element)
 
 
-def random_mouse_wander(driver):
-    """在页面空白区域随机滑动，模拟用户视线观察"""
-    try:
-        driver.execute_script(f"window.scrollBy({{top: {random.randint(-120, 180)}, behavior: 'smooth'}});")
-        human_sleep(0.5, 1.2)
-    except Exception:
-        pass
+def solve_turnstile(driver, context_name="未知环节", max_wait=20):
+    """穿透 Cloudflare Turnstile 验证盾"""
+    print(f"  🛡️ 处理 [{context_name}] 的 Cloudflare Turnstile 验证...", flush=True)
+    
+    # 优先使用 uc_gui_click_cf 穿透 Turnstile
+    for _ in range(3):
+        try:
+            driver.uc_gui_click_cf()
+            print(f"  👉 [{context_name}] 调用 uc_gui_click_cf 物理点击", flush=True)
+            human_sleep(2.0, 3.0)
+            break
+        except Exception:
+            try:
+                driver.uc_gui_click_captcha()
+                print(f"  👉 [{context_name}] 调用 uc_gui_click_captcha 物理点击", flush=True)
+                human_sleep(2.0, 3.0)
+                break
+            except Exception:
+                human_sleep(1.0, 2.0)
 
-
-def solve_turnstile(driver, context_name="未知环节", max_wait=15):
-    """模拟真人应对 Cloudflare Turnstile 验证框"""
-    print(f"  🛡️ 检查 [{context_name}] 是否存在 Cloudflare Turnstile 验证...", flush=True)
-    human_sleep(1.5, 2.5)
-
-    # 1. 优先调用 SeleniumBase 原生 CAPTCHA 穿透
-    try:
-        driver.uc_gui_click_captcha()
-        print(f"  👉 [{context_name}] 已调用 SeleniumBase 原生 CAPTCHA 穿透", flush=True)
-        human_sleep(2.0, 3.5)
-    except Exception:
-        pass
-
-    # 2. 模拟真人鼠标对 iframe 复选框的物理点击
+    # 尝试模拟物理事件点击 iframe 内部区域
     try:
         driver.execute_script("""
-            const iframes = document.querySelectorAll('iframe[src*="cloudflare"], iframe[src*="turnstile"], iframe[src*="challenges"]');
+            const iframes = Array.from(document.querySelectorAll('iframe')).filter(f => {
+                const s = f.getAttribute('src') || '';
+                return s.includes('cloudflare') || s.includes('turnstile') || s.includes('challenges');
+            });
             iframes.forEach(f => {
-                f.scrollIntoView({behavior: 'smooth', block: 'center'});
+                f.scrollIntoView({block: 'center'});
                 const rect = f.getBoundingClientRect();
                 const evt = new MouseEvent('click', {
                     bubbles: true,
                     cancelable: true,
-                    clientX: rect.left + 25 + Math.floor(Math.random() * 8),
-                    clientY: rect.top + 25 + Math.floor(Math.random() * 8)
+                    clientX: rect.left + 28,
+                    clientY: rect.top + 28
                 });
                 f.dispatchEvent(evt);
             });
@@ -132,25 +173,21 @@ def solve_turnstile(driver, context_name="未知环节", max_wait=15):
     except Exception:
         pass
 
-    # 3. 轮询检测是否生成有效 Token
+    # 等待验证完成或页面刷新
     start = time.time()
     while time.time() - start < max_wait:
-        has_token = driver.execute_script("""
-            const input = document.querySelector('input[name="cf-turnstile-response"], [name="cf_challenge_response"]');
-            return !!(input && input.value);
-        """)
-        if has_token:
-            print(f"  🟢 [{context_name}] Turnstile 验证已成功通过！", flush=True)
-            human_sleep(1.0, 1.8)
+        # 判断盾牌是否已消退（密码框是否出现）
+        pwd_found = driver.execute_script("return !!document.querySelector('input[type=\"password\"]');")
+        if pwd_found:
+            print(f"  🟢 [{context_name}] 验证成功，已检测到登录表单！", flush=True)
             return True
         time.sleep(1)
 
-    print(f"  ℹ️ [{context_name}] 未检测到显式阻止或已静默放行", flush=True)
+    print(f"  ℹ️ [{context_name}] 验证等待结束", flush=True)
     return False
 
 
 def get_servers_info(driver):
-    """提取页面所有服务器卡片的信息"""
     info = []
     try:
         cards = driver.find_elements(By.XPATH, "//div[contains(@class, 'rounded') and .//button[contains(., 'RENOVAR')]]")
@@ -167,51 +204,66 @@ def get_servers_info(driver):
 
 
 def main():
-    print("=== EKNodes 自动续期任务启动 (真人拟真版) ===", flush=True)
+    print("=== EKNodes 自动续期任务启动 ===", flush=True)
     if not (EK_EMAIL or EK_USERNAME) or not EK_PASSWORD:
-        print("❌ 未在 Secrets 中配置账号或密码 (EK_EMAIL / EK_USERNAME / EK_PASSWORD)", flush=True)
+        print("❌ 未在 Secrets 中配置账号或密码", flush=True)
         return
 
-    driver = Driver(uc=True, headless=False)
+    gost_proc = None
+    uc_proxy = None
+
+    if SOCKS5_PROXY:
+        try:
+            gost_proc = start_gost(SOCKS5_PROXY)
+            uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
+            print("🔗 代理已启动。")
+        except Exception as e:
+            print(f"⚠️ 代理启动失败：{e}，尝试直连。")
+
+    driver = Driver(uc=True, headless=False, proxy=uc_proxy)
 
     try:
-        # 1. 模拟真人访问登录页
         print(f"🌐 正在访问登录页: {LOGIN_URL} ...", flush=True)
         driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=6)
-        human_sleep(3.0, 4.5)
-        random_mouse_wander(driver)
+        human_sleep(3.0, 5.0)
+
+        # 检查是否遭遇前置 Turnstile 拦截盾
+        for attempt in range(3):
+            body_text = driver.get_text("body")
+            if "Verify you are human" in body_text or "BIENVENIDO" in body_text:
+                print(f"🛡️ 遭遇 Cloudflare 前置拦截盾 (第 {attempt+1} 次穿透尝试)...", flush=True)
+                solve_turnstile(driver, context_name="前置验证盾")
+                human_sleep(3.0, 4.0)
+            else:
+                break
 
         if "/servers" not in driver.current_url:
             text_inputs = driver.find_elements(By.CSS_SELECTOR, "input:not([type='password']):not([type='checkbox']):not([type='hidden'])")
             
             if len(text_inputs) >= 2 and EK_EMAIL and EK_USERNAME:
-                print("  📝 检测到双输入框，拟真依次填入邮箱与用户名...", flush=True)
+                print("  📝 检测到双输入框，分别填入邮箱与用户名...", flush=True)
                 human_type(driver, text_inputs[0], EK_EMAIL)
-                human_sleep(0.6, 1.2)
+                human_sleep(0.5, 1.0)
                 human_type(driver, text_inputs[1], EK_USERNAME)
             elif len(text_inputs) >= 1:
                 account_val = EK_EMAIL if EK_EMAIL else EK_USERNAME
                 masked_acc = account_val[:3] + "***" if len(account_val) > 3 else "***"
-                print(f"  📝 拟真填入登录账号: {masked_acc}", flush=True)
+                print(f"  📝 填入登录账号: {masked_acc}", flush=True)
                 human_type(driver, text_inputs[0], account_val)
             else:
-                raise RuntimeError("未能找到登录账号输入框！")
+                driver.save_screenshot("ek_no_input.png")
+                raise RuntimeError("未能找到登录账号输入框，可能仍停留在验证盾页面！")
 
+            human_sleep(0.5, 1.0)
+
+            pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
+            print("  📝 填入密码...", flush=True)
+            human_type(driver, pwd_elem, EK_PASSWORD)
             human_sleep(0.8, 1.5)
 
-            # 拟真填入密码
-            pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
-            print("  📝 拟真填入密码...", flush=True)
-            human_type(driver, pwd_elem, EK_PASSWORD)
-            human_sleep(0.8, 1.6)
-
-            # 验证码穿透
-            solve_turnstile(driver, context_name="登录表单")
-            human_sleep(1.0, 2.0)
-
-            # 拟真移动并点击登录按钮
+            # 点击登录提交
             submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'Iniciar') or contains(., 'Login') or contains(., 'Entrar')]")
-            print("🔑 拟真点击登录提交按钮...", flush=True)
+            print("🔑 拟真点击登录按钮...", flush=True)
             human_click(driver, submit_btn)
 
             for _ in range(15):
@@ -225,17 +277,14 @@ def main():
 
             print(f"✅ 登录成功！当前 URL: {driver.current_url}", flush=True)
 
-        # 2. 访问服务器控制台
         if "/servers" not in driver.current_url:
             human_sleep(1.5, 2.5)
             driver.get(SERVERS_URL)
-            human_sleep(3.0, 4.5)
+            human_sleep(3.0, 4.0)
 
-        random_mouse_wander(driver)
         status_before = get_servers_info(driver)
         print(f"📊 续期前服务器状态:\n{status_before}", flush=True)
 
-        # 3. 查找 RENOVAR 按钮
         renovar_buttons = driver.find_elements(By.XPATH, "//button[contains(., 'RENOVAR')]")
         if not renovar_buttons:
             print("ℹ️ 当前未找到 RENOVAR 按钮或尚未到期。", flush=True)
@@ -247,23 +296,20 @@ def main():
         for idx, btn in enumerate(renovar_buttons):
             print(f"👉 拟真点击第 {idx+1}/{len(renovar_buttons)} 台服务器的 RENOVAR 按钮...", flush=True)
             human_click(driver, btn)
-            human_sleep(2.5, 3.8)
+            human_sleep(2.5, 3.5)
 
-            # 处理弹窗验证码
             solve_turnstile(driver, context_name=f"服务器#{idx+1} 续期弹窗")
             human_sleep(1.5, 2.5)
 
-            # 拟真确认续期
             confirm_xpath = "//button[contains(., 'CONFIRMAR') or contains(., 'Confirmar') or contains(., 'RENOVACIÓN')]"
             confirm_btn = driver.find_elements(By.XPATH, confirm_xpath)
             if confirm_btn and confirm_btn[0].is_displayed():
-                print("  🚀 拟真点击 [CONFIRMAR RENOVACIÓN]...", flush=True)
+                print("  🚀 拟真确认点击 [CONFIRMAR RENOVACIÓN]...", flush=True)
                 human_click(driver, confirm_btn[0])
                 human_sleep(3.5, 5.0)
 
-        # 4. 刷新获取最新状态并推送通知
         driver.refresh()
-        human_sleep(4.0, 6.0)
+        human_sleep(4.0, 5.0)
         status_after = get_servers_info(driver)
         driver.save_screenshot("ek_final.png")
 
@@ -286,6 +332,9 @@ def main():
             pass
     finally:
         driver.quit()
+        if gost_proc:
+            gost_proc.terminate()
+            print("gost 代理已退出。")
 
 
 if __name__ == "__main__":
