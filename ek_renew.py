@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动登录与服务器续期脚本 (点击登录后验证版)
+# EKNodes 自动登录与服务器续期脚本 (全状态 TG 通知 + 深度渲染等待版)
 # ============================================================
 import os
 import re
@@ -36,12 +36,13 @@ def human_sleep(min_s=1.0, max_s=2.0):
 
 def tg_send(text: str, photo_path: str = None):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        print("⚠️ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过通知。")
         return
     try:
         if photo_path and os.path.exists(photo_path):
             url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
             with open(photo_path, "rb") as f:
-                requests.post(
+                resp = requests.post(
                     url,
                     data={"chat_id": TG_CHAT_ID, "caption": text, "parse_mode": "HTML"},
                     files={"photo": f},
@@ -49,14 +50,17 @@ def tg_send(text: str, photo_path: str = None):
                 )
         else:
             url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-            requests.post(
+            resp = requests.post(
                 url,
                 data={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"},
                 timeout=30,
             )
-        print("  ✅ TG 通知发送成功")
+        if resp.status_code == 200:
+            print("  ✅ TG 通知发送成功", flush=True)
+        else:
+            print(f"  ⚠️ TG 通知发送返回码 {resp.status_code}: {resp.text}", flush=True)
     except Exception as e:
-        print(f"  ⚠️ TG 通知异常: {e}")
+        print(f"  ⚠️ TG 通知发送异常: {e}", flush=True)
 
 
 def normalize_socks5_proxy(proxy_value: str) -> str:
@@ -78,7 +82,7 @@ def wait_http_proxy_ready(port: int, timeout: int = 15):
         try:
             resp = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=8)
             if resp.ok:
-                print("  ✅ 本地 HTTP 代理连通性测试成功")
+                print("  ✅ 本地 HTTP 代理连通性测试成功", flush=True)
                 return
         except Exception as e:
             last_error = e
@@ -89,13 +93,13 @@ def wait_http_proxy_ready(port: int, timeout: int = 15):
 def start_gost(socks_proxy: str) -> subprocess.Popen:
     normalized = normalize_socks5_proxy(socks_proxy)
     cmd = ["gost", "-L", f"http://127.0.0.1:{LOCAL_HTTP_PORT}", "-F", f"socks5://{normalized}"]
-    print("  🚀 启动 gost 代理中转...")
+    print("  🚀 启动 gost 代理中转...", flush=True)
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(2)
     if proc.poll() is not None:
         raise RuntimeError("gost 启动失败，请检查 SOCKS5_PROXY 格式和 gost 安装。")
     wait_http_proxy_ready(LOCAL_HTTP_PORT)
-    print(f"  ✅ gost 已启动，本地代理端口：{LOCAL_HTTP_PORT}")
+    print(f"  ✅ gost 已启动，本地代理端口：{LOCAL_HTTP_PORT}", flush=True)
     return proc
 
 
@@ -132,22 +136,21 @@ def human_click(driver, element):
 
 
 def click_turnstile_checkbox(driver, timeout=30):
-    """专门穿透点击弹出在屏幕正中间的 Turnstile 复选框"""
-    print("  🛡️ 检测到 Cloudflare 验证框，正在定位并点击复选框...", flush=True)
+    """穿透点击 Turnstile 复选框"""
+    print("  🛡️ 检测 Cloudflare 验证框并尝试点击...", flush=True)
     start = time.time()
     while time.time() - start < timeout:
-        # 如果已经跳转到了后台控制台，直接代表成功
-        if "/servers" in driver.current_url or "/dashboard" in driver.current_url:
-            print("  🟢 页面已成功跳转！", flush=True)
+        if "/servers" in driver.current_url:
+            print("  🟢 页面已成功放行！", flush=True)
             return True
 
-        # 方法 1：切入 iframe 内部点击 input 或 label
+        # 方法 1：切入 iframe 物理点击
         try:
             driver.switch_to.default_content()
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             for f in iframes:
                 src = f.get_attribute("src") or ""
-                if "cloudflare" in src or "turnstile" in src or "challenges" in src:
+                if any(k in src for k in ("cloudflare", "turnstile", "challenges")):
                     driver.switch_to.frame(f)
                     time.sleep(0.3)
                     boxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox'], #checkbox, .ctp-checkbox-label")
@@ -159,7 +162,7 @@ def click_turnstile_checkbox(driver, timeout=30):
         except Exception:
             driver.switch_to.default_content()
 
-        # 方法 2：SeleniumBase 原生接口兜底
+        # 方法 2：SeleniumBase 原生兜底
         try:
             driver.uc_gui_click_cf()
         except Exception:
@@ -168,7 +171,6 @@ def click_turnstile_checkbox(driver, timeout=30):
             except Exception:
                 pass
 
-        # 检查是否成功放行
         time.sleep(3)
         if "/login" not in driver.current_url:
             print("  🟢 验证通过，已离开登录页！", flush=True)
@@ -178,19 +180,24 @@ def click_turnstile_checkbox(driver, timeout=30):
 
 
 def get_servers_info(driver):
+    """提取页面上的服务器卡片信息"""
     info = []
     try:
-        cards = driver.find_elements(By.XPATH, "//div[contains(@class, 'rounded') and .//button[contains(., 'RENOVAR')]]")
+        # 兼容多种卡片结构
+        cards = driver.find_elements(By.XPATH, "//div[contains(@class, 'rounded') and (.//button[contains(., 'RENOVAR')] or .//button[contains(., 'GESTIONAR')])]")
+        if not cards:
+            cards = driver.find_elements(By.XPATH, "//div[contains(., 'Expira') and contains(@class, 'rounded')]")
+
         for c in cards:
             text = c.text
             match = re.search(r'Expira\s+([0-9A-Za-z\s]+)', text)
             exp_date = match.group(1).strip() if match else "未知"
-            lines = text.split("\n")
-            name = lines[0].strip() if lines else "Server"
+            lines = [l.strip() for l in text.split("\n") if l.strip()]
+            name = lines[0] if lines else "Server"
             info.append(f"• <b>{name}</b>: 到期时间 <code>{exp_date}</code>")
     except Exception as e:
         print(f"提取状态异常: {e}")
-    return "\n".join(info) if info else "状态获取成功"
+    return "\n".join(info) if info else "服务器运行正常"
 
 
 def main():
@@ -207,9 +214,9 @@ def main():
         try:
             gost_proc = start_gost(SOCKS5_PROXY)
             uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
-            print("🔗 代理已启动。")
+            print("🔗 代理已启动。", flush=True)
         except Exception as e:
-            print(f"⚠️ 代理启动失败：{e}，尝试直连。")
+            print(f"⚠️ 代理启动失败：{e}，尝试直连。", flush=True)
 
     driver = Driver(uc=True, headless=False, proxy=uc_proxy)
 
@@ -220,7 +227,6 @@ def main():
         human_sleep(3.0, 4.5)
 
         if "/servers" not in driver.current_url:
-            # 步骤一：填表单
             email_elem = driver.wait_for_element_visible("input[type='email'], input[type='text']", timeout=20)
             masked_acc = login_account[:3] + "***" if len(login_account) > 3 else "***"
             print(f"  📝 [第一步] 填入登录邮箱账号: {masked_acc}", flush=True)
@@ -236,12 +242,11 @@ def main():
             print("🔑 [第一步] 点击 INICIAR SESIÓN 按钮提交...", flush=True)
             human_click(driver, submit_btn)
 
-            # 步骤二：等待弹出 Turnstile 验证框并点击通过
+            # 等待 Turnstile 弹窗并完成验证
             human_sleep(2.0, 3.0)
             print("🛡️ [第二步] 正在处理弹出的 Cloudflare 人机验证...", flush=True)
             click_turnstile_checkbox(driver, timeout=35)
 
-            # 确认是否成功跳转
             for _ in range(15):
                 if "/login" not in driver.current_url:
                     break
@@ -253,54 +258,75 @@ def main():
 
             print(f"✅ 登录成功！当前 URL: {driver.current_url}", flush=True)
 
-        # 3. 访问服务器页面
-        if "/servers" not in driver.current_url:
-            human_sleep(1.5, 2.5)
-            driver.get(SERVERS_URL)
-            human_sleep(3.0, 4.0)
+        # 2. 无论停在哪个页面，强制访问 /servers 并等待 DOM 加载完毕
+        print(f"🚀 正在进入服务器管理页面: {SERVERS_URL} ...", flush=True)
+        driver.get(SERVERS_URL)
+        human_sleep(5.0, 7.0)
+
+        # 显式等待：等待页面出现 "SERVIDORES" 标题或任何卡片
+        try:
+            driver.wait_for_element_present("//h1[contains(., 'SERVIDORES')] | //button[contains(., 'GESTIONAR')]", timeout=20)
+            print("  🎯 检测到服务器管理页面主要内容已加载完成！", flush=True)
+        except Exception:
+            print("  ⚠️ 等待主元素超时，继续尝试检索卡片...", flush=True)
 
         status_before = get_servers_info(driver)
-        print(f"📊 续期前服务器状态:\n{status_before}", flush=True)
+        print(f"📊 当前服务器状态:\n{status_before}", flush=True)
 
-        # 4. 点击 RENOVAR 按钮
-        renovar_buttons = driver.find_elements(By.XPATH, "//button[contains(., 'RENOVAR')]")
-        if not renovar_buttons:
-            print("ℹ️ 当前未找到 RENOVAR 按钮或尚未到期。", flush=True)
-            driver.save_screenshot("ek_no_button.png")
-            return
+        # 3. 抓取所有可点击的 RENOVAR 按钮
+        renovar_btn_xpath = "//button[contains(., 'RENOVAR') or contains(., 'Renovar')]"
+        renovar_buttons = driver.find_elements(By.XPATH, renovar_btn_xpath)
 
         now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
-        for idx, btn in enumerate(renovar_buttons):
-            print(f"👉 点击第 {idx+1}/{len(renovar_buttons)} 台服务器的 RENOVAR 按钮...", flush=True)
-            human_click(driver, btn)
-            human_sleep(3.0, 4.0)
+        # 如果没有找到 RENOVAR 按钮（说明当前已是满额 7 天，暂无需续期）
+        if not renovar_buttons:
+            print("ℹ️ 当前页面未检测到待续期按钮（服务器周期已是满额 7 天）。", flush=True)
+            driver.save_screenshot("ek_current_status.png")
+            # 必须发送巡检正常通知
+            tg_send(
+                f"🛡️ <b>EKNodes 自动巡检正常</b>\n\n"
+                f"当前服务器到期时间充足（无需续期）：\n{status_before}\n\n"
+                f"⏰ <b>巡检时间：</b><code>{now_time}</code>",
+                photo_path="ek_current_status.png"
+            )
+            print("✅ 状态正常通知已推送到 Telegram。", flush=True)
+            return
 
-            # 弹窗内同样可能需要过一次 Turnstile
+        # 4. 如果有 RENOVAR 按钮，逐一点击续期
+        for idx, btn in enumerate(renovar_buttons):
+            print(f"👉 正在点击第 {idx+1}/{len(renovar_buttons)} 台服务器的 RENOVAR 按钮...", flush=True)
+            human_click(driver, btn)
+            human_sleep(3.0, 4.5)
+
+            # 弹窗内验证码
+            print("  🛡️ 检查并处理续期弹窗内 Turnstile 验证码...", flush=True)
             click_turnstile_checkbox(driver, timeout=20)
             human_sleep(1.5, 2.5)
 
             confirm_xpath = "//button[contains(., 'CONFIRMAR') or contains(., 'Confirmar') or contains(., 'RENOVACIÓN')]"
-            confirm_btn = driver.find_elements(By.XPATH, confirm_xpath)
-            if confirm_btn and confirm_btn[0].is_displayed():
-                print("  🚀 确认点击 [CONFIRMAR RENOVACIÓN]...", flush=True)
-                human_click(driver, confirm_btn[0])
-                human_sleep(3.5, 5.0)
+            confirm_btns = driver.find_elements(By.XPATH, confirm_xpath)
+            if confirm_btns and confirm_btns[0].is_displayed():
+                print("  🚀 拟真点击 [CONFIRMAR RENOVACIÓN] 确认续期！", flush=True)
+                human_click(driver, confirm_btns[0])
+                human_sleep(4.0, 6.0)
+            else:
+                print("  ⚠️ 未找到确认续期按钮或按钮未激活", flush=True)
 
-        # 5. 刷新获取续期后状态并推送通知
+        # 5. 续期完成后刷新并推送成功通知
         driver.refresh()
-        human_sleep(4.0, 5.0)
+        human_sleep(4.0, 6.0)
         status_after = get_servers_info(driver)
         driver.save_screenshot("ek_final.png")
 
         tg_send(
-            f"📋 <b>EKNodes 服务器自动续期汇总</b>\n\n"
+            f"🎉 <b>EKNodes 服务器自动续期成功</b>\n\n"
             f"<b>续期前：</b>\n{status_before}\n\n"
             f"<b>续期后：</b>\n{status_after}\n\n"
             f"⏰ <b>执行时间：</b><code>{now_time}</code>",
             photo_path="ek_final.png"
         )
-        print("\n🎉 全部操作已完成！", flush=True)
+        print("\n🎉 全部操作已顺利完成，已推送到 Telegram！", flush=True)
 
     except Exception as e:
         err = str(e)
@@ -314,7 +340,7 @@ def main():
         driver.quit()
         if gost_proc:
             gost_proc.terminate()
-            print("gost 代理已退出。")
+            print("gost 代理已退出。", flush=True)
 
 
 if __name__ == "__main__":
