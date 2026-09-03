@@ -2,12 +2,13 @@ name: ACLClouds Auto Renew
 
 on:
   schedule:
-    - cron: '0 */12 * * *'  # 每 12 小时检查一次
-  workflow_dispatch:
+    - cron: '0 */6 * * *'  # 每 6 小时自动巡检一次
+  workflow_dispatch:        # 支持手动立即触发
 
 jobs:
   renew:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -17,16 +18,20 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Dependencies
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb wget
-          pip install seleniumbase requests
+
+      - name: Install Python Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install seleniumbase requests ddddocr Pillow
 
       - name: Install gost (Proxy)
         run: |
           wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
-          gunzip gost-linux-amd64-2.11.5.gz
+          gzip -d gost-linux-amd64-2.11.5.gz
           chmod +x gost-linux-amd64-2.11.5
           sudo mv gost-linux-amd64-2.11.5 /usr/local/bin/gost
 
@@ -38,4 +43,4 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python -u renew.py
+          xvfb-run -a -s "-screen 0 1920x1080x24" python -u renew.py
