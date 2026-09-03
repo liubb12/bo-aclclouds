@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动登录与服务器续期脚本 (全状态 TG 通知 + 深度渲染等待版)
+# EKNodes 自动登录与服务器续期脚本 (最终稳定版)
 # ============================================================
 import os
 import re
@@ -144,7 +144,7 @@ def click_turnstile_checkbox(driver, timeout=30):
             print("  🟢 页面已成功放行！", flush=True)
             return True
 
-        # 方法 1：切入 iframe 物理点击
+        # 方法 1：切入 iframe 物理点击复选框
         try:
             driver.switch_to.default_content()
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
@@ -162,7 +162,7 @@ def click_turnstile_checkbox(driver, timeout=30):
         except Exception:
             driver.switch_to.default_content()
 
-        # 方法 2：SeleniumBase 原生兜底
+        # 方法 2：SeleniumBase 原生接口兜底
         try:
             driver.uc_gui_click_cf()
         except Exception:
@@ -180,17 +180,16 @@ def click_turnstile_checkbox(driver, timeout=30):
 
 
 def get_servers_info(driver):
-    """提取页面上的服务器卡片信息"""
+    """提取页面上的服务器卡片信息（已修正正则排版）"""
     info = []
     try:
-        # 兼容多种卡片结构
         cards = driver.find_elements(By.XPATH, "//div[contains(@class, 'rounded') and (.//button[contains(., 'RENOVAR')] or .//button[contains(., 'GESTIONAR')])]")
         if not cards:
             cards = driver.find_elements(By.XPATH, "//div[contains(., 'Expira') and contains(@class, 'rounded')]")
 
         for c in cards:
             text = c.text
-            match = re.search(r'Expira\s+([0-9A-Za-z\s]+)', text)
+            match = re.search(r'Expira\s+([0-9]{1,2}\s+[a-zA-Z]+\s+[0-9]{4})', text)
             exp_date = match.group(1).strip() if match else "未知"
             lines = [l.strip() for l in text.split("\n") if l.strip()]
             name = lines[0] if lines else "Server"
@@ -258,12 +257,11 @@ def main():
 
             print(f"✅ 登录成功！当前 URL: {driver.current_url}", flush=True)
 
-        # 2. 无论停在哪个页面，强制访问 /servers 并等待 DOM 加载完毕
+        # 2. 强制访问 /servers 并等待 DOM 加载完毕
         print(f"🚀 正在进入服务器管理页面: {SERVERS_URL} ...", flush=True)
         driver.get(SERVERS_URL)
         human_sleep(5.0, 7.0)
 
-        # 显式等待：等待页面出现 "SERVIDORES" 标题或任何卡片
         try:
             driver.wait_for_element_present("//h1[contains(., 'SERVIDORES')] | //button[contains(., 'GESTIONAR')]", timeout=20)
             print("  🎯 检测到服务器管理页面主要内容已加载完成！", flush=True)
@@ -273,17 +271,16 @@ def main():
         status_before = get_servers_info(driver)
         print(f"📊 当前服务器状态:\n{status_before}", flush=True)
 
-        # 3. 抓取所有可点击的 RENOVAR 按钮
+        # 3. 抓取所有待点击的 RENOVAR 按钮
         renovar_btn_xpath = "//button[contains(., 'RENOVAR') or contains(., 'Renovar')]"
         renovar_buttons = driver.find_elements(By.XPATH, renovar_btn_xpath)
 
         now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
-        # 如果没有找到 RENOVAR 按钮（说明当前已是满额 7 天，暂无需续期）
+        # 若未找到 RENOVAR 按钮（说明周期已满 7 天无需续期）
         if not renovar_buttons:
             print("ℹ️ 当前页面未检测到待续期按钮（服务器周期已是满额 7 天）。", flush=True)
             driver.save_screenshot("ek_current_status.png")
-            # 必须发送巡检正常通知
             tg_send(
                 f"🛡️ <b>EKNodes 自动巡检正常</b>\n\n"
                 f"当前服务器到期时间充足（无需续期）：\n{status_before}\n\n"
@@ -293,7 +290,7 @@ def main():
             print("✅ 状态正常通知已推送到 Telegram。", flush=True)
             return
 
-        # 4. 如果有 RENOVAR 按钮，逐一点击续期
+        # 4. 逐一执行续期与弹窗内二次验证
         for idx, btn in enumerate(renovar_buttons):
             print(f"👉 正在点击第 {idx+1}/{len(renovar_buttons)} 台服务器的 RENOVAR 按钮...", flush=True)
             human_click(driver, btn)
@@ -313,7 +310,7 @@ def main():
             else:
                 print("  ⚠️ 未找到确认续期按钮或按钮未激活", flush=True)
 
-        # 5. 续期完成后刷新并推送成功通知
+        # 5. 刷新获取最新状态并推送 Telegram
         driver.refresh()
         human_sleep(4.0, 6.0)
         status_after = get_servers_info(driver)
