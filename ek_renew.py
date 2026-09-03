@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动登录与服务器续期脚本 (代理 + CF 盾牌穿透增强版)
+# EKNodes 自动登录与服务器续期脚本 (邮箱优先 + 强穿透版)
 # ============================================================
 import os
 import re
@@ -110,7 +110,7 @@ def human_type(driver, element, text: str):
 
         for ch in text:
             element.send_keys(ch)
-            time.sleep(random.uniform(0.06, 0.16))
+            time.sleep(random.uniform(0.05, 0.14))
 
         driver.execute_script("""
             const el = arguments[0];
@@ -131,59 +131,67 @@ def human_click(driver, element):
         driver.execute_script("arguments[0].click();", element)
 
 
-def solve_turnstile(driver, context_name="未知环节", max_wait=20):
-    """穿透 Cloudflare Turnstile 验证盾"""
-    print(f"  🛡️ 处理 [{context_name}] 的 Cloudflare Turnstile 验证...", flush=True)
+def solve_turnstile_shield(driver, context_name="前置验证盾", max_wait=35):
+    """
+    专门穿透全屏 BIENVENIDO / Verify you are human 挑战
+    只有当盾牌完全消失、出现真实的表单/页面时才返回
+    """
+    print(f"🛡️ 开始处理 [{context_name}] Cloudflare Turnstile 挑战...", flush=True)
+    start = time.time()
     
-    # 优先使用 uc_gui_click_cf 穿透 Turnstile
-    for _ in range(3):
+    while time.time() - start < max_wait:
+        body_text = driver.get_text("body")
+        has_login_input = driver.execute_script(
+            "return !!document.querySelector('input[type=\"password\"], input[type=\"email\"], input[name=\"email\"]');"
+        )
+        # 如果已经没有验证提示，且出现了真正的输入框或已经在控制台，说明穿透成功
+        if not ("Verify you are human" in body_text or "BIENVENIDO" in body_text) and has_login_input:
+            print(f"  🟢 [{context_name}] 成功穿透，已加载正式表单！", flush=True)
+            return True
+
+        if "/servers" in driver.current_url:
+            print("  🟢 已直接进入服务器列表页面！", flush=True)
+            return True
+
+        print(f"  👉 正在尝试穿透 [{context_name}] 复选框...", flush=True)
+
+        # 1. 尝试调用 SeleniumBase 原生穿透
         try:
             driver.uc_gui_click_cf()
-            print(f"  👉 [{context_name}] 调用 uc_gui_click_cf 物理点击", flush=True)
             human_sleep(2.0, 3.0)
-            break
         except Exception:
             try:
                 driver.uc_gui_click_captcha()
-                print(f"  👉 [{context_name}] 调用 uc_gui_click_captcha 物理点击", flush=True)
                 human_sleep(2.0, 3.0)
-                break
             except Exception:
-                human_sleep(1.0, 2.0)
+                pass
 
-    # 尝试模拟物理事件点击 iframe 内部区域
-    try:
-        driver.execute_script("""
-            const iframes = Array.from(document.querySelectorAll('iframe')).filter(f => {
-                const s = f.getAttribute('src') || '';
-                return s.includes('cloudflare') || s.includes('turnstile') || s.includes('challenges');
-            });
-            iframes.forEach(f => {
-                f.scrollIntoView({block: 'center'});
-                const rect = f.getBoundingClientRect();
-                const evt = new MouseEvent('click', {
-                    bubbles: true,
-                    cancelable: true,
-                    clientX: rect.left + 28,
-                    clientY: rect.top + 28
-                });
-                f.dispatchEvent(evt);
-            });
-        """)
-    except Exception:
-        pass
+        # 2. 模拟物理点击 iframe 中的复选框
+        try:
+            driver.execute_script("""
+                const iframes = Array.from(document.querySelectorAll('iframe'));
+                for (let f of iframes) {
+                    const src = f.getAttribute('src') || '';
+                    if (src.includes('cloudflare') || src.includes('turnstile') || src.includes('challenges')) {
+                        f.scrollIntoView({block: 'center'});
+                        const rect = f.getBoundingClientRect();
+                        const evt = new MouseEvent('click', {
+                            bubbles: true,
+                            cancelable: true,
+                            clientX: rect.left + 28,
+                            clientY: rect.top + (rect.height / 2),
+                            view: window
+                        });
+                        f.dispatchEvent(evt);
+                        break;
+                    }
+                }
+            """)
+        except Exception:
+            pass
 
-    # 等待验证完成或页面刷新
-    start = time.time()
-    while time.time() - start < max_wait:
-        # 判断盾牌是否已消退（密码框是否出现）
-        pwd_found = driver.execute_script("return !!document.querySelector('input[type=\"password\"]');")
-        if pwd_found:
-            print(f"  🟢 [{context_name}] 验证成功，已检测到登录表单！", flush=True)
-            return True
-        time.sleep(1)
+        time.sleep(2.5)
 
-    print(f"  ℹ️ [{context_name}] 验证等待结束", flush=True)
     return False
 
 
@@ -205,8 +213,9 @@ def get_servers_info(driver):
 
 def main():
     print("=== EKNodes 自动续期任务启动 ===", flush=True)
-    if not (EK_EMAIL or EK_USERNAME) or not EK_PASSWORD:
-        print("❌ 未在 Secrets 中配置账号或密码", flush=True)
+    login_account = EK_EMAIL if EK_EMAIL else EK_USERNAME
+    if not login_account or not EK_PASSWORD:
+        print("❌ 未在 Secrets 中配置登录邮箱 (EK_EMAIL) 或密码 (EK_PASSWORD)", flush=True)
         return
 
     gost_proc = None
@@ -227,33 +236,23 @@ def main():
         driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=6)
         human_sleep(3.0, 5.0)
 
-        # 检查是否遭遇前置 Turnstile 拦截盾
-        for attempt in range(3):
-            body_text = driver.get_text("body")
-            if "Verify you are human" in body_text or "BIENVENIDO" in body_text:
-                print(f"🛡️ 遭遇 Cloudflare 前置拦截盾 (第 {attempt+1} 次穿透尝试)...", flush=True)
-                solve_turnstile(driver, context_name="前置验证盾")
-                human_sleep(3.0, 4.0)
-            else:
-                break
+        # 检查并穿透全屏盾牌
+        body_text = driver.get_text("body")
+        if "Verify you are human" in body_text or "BIENVENIDO" in body_text:
+            solve_turnstile_shield(driver, context_name="前置登录盾")
+            human_sleep(2.5, 4.0)
 
+        # 登录流程
         if "/servers" not in driver.current_url:
             text_inputs = driver.find_elements(By.CSS_SELECTOR, "input:not([type='password']):not([type='checkbox']):not([type='hidden'])")
             
-            if len(text_inputs) >= 2 and EK_EMAIL and EK_USERNAME:
-                print("  📝 检测到双输入框，分别填入邮箱与用户名...", flush=True)
-                human_type(driver, text_inputs[0], EK_EMAIL)
-                human_sleep(0.5, 1.0)
-                human_type(driver, text_inputs[1], EK_USERNAME)
-            elif len(text_inputs) >= 1:
-                account_val = EK_EMAIL if EK_EMAIL else EK_USERNAME
-                masked_acc = account_val[:3] + "***" if len(account_val) > 3 else "***"
-                print(f"  📝 填入登录账号: {masked_acc}", flush=True)
-                human_type(driver, text_inputs[0], account_val)
-            else:
-                driver.save_screenshot("ek_no_input.png")
-                raise RuntimeError("未能找到登录账号输入框，可能仍停留在验证盾页面！")
+            if not text_inputs:
+                driver.save_screenshot("ek_shield_blocked.png")
+                raise RuntimeError("未能加载登录表单，依然被 Cloudflare 盾牌阻挡！")
 
+            masked_acc = login_account[:3] + "***" if len(login_account) > 3 else "***"
+            print(f"  📝 填入登录邮箱账号: {masked_acc}", flush=True)
+            human_type(driver, text_inputs[0], login_account)
             human_sleep(0.5, 1.0)
 
             pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
@@ -263,7 +262,7 @@ def main():
 
             # 点击登录提交
             submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'Iniciar') or contains(., 'Login') or contains(., 'Entrar')]")
-            print("🔑 拟真点击登录按钮...", flush=True)
+            print("🔑 点击登录按钮...", flush=True)
             human_click(driver, submit_btn)
 
             for _ in range(15):
@@ -273,10 +272,11 @@ def main():
 
             if "/login" in driver.current_url:
                 driver.save_screenshot("ek_login_fail.png")
-                raise RuntimeError("登录未跳转，请检查账号密码或风控拦截")
+                raise RuntimeError("登录未跳转，请检查邮箱和密码是否正确，或触发了二次拦截")
 
             print(f"✅ 登录成功！当前 URL: {driver.current_url}", flush=True)
 
+        # 访问服务器页面
         if "/servers" not in driver.current_url:
             human_sleep(1.5, 2.5)
             driver.get(SERVERS_URL)
@@ -285,6 +285,7 @@ def main():
         status_before = get_servers_info(driver)
         print(f"📊 续期前服务器状态:\n{status_before}", flush=True)
 
+        # 寻找 RENOVAR 按钮
         renovar_buttons = driver.find_elements(By.XPATH, "//button[contains(., 'RENOVAR')]")
         if not renovar_buttons:
             print("ℹ️ 当前未找到 RENOVAR 按钮或尚未到期。", flush=True)
@@ -294,20 +295,26 @@ def main():
         now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
         for idx, btn in enumerate(renovar_buttons):
-            print(f"👉 拟真点击第 {idx+1}/{len(renovar_buttons)} 台服务器的 RENOVAR 按钮...", flush=True)
+            print(f"👉 点击第 {idx+1}/{len(renovar_buttons)} 台服务器的 RENOVAR 按钮...", flush=True)
             human_click(driver, btn)
-            human_sleep(2.5, 3.5)
+            human_sleep(3.0, 4.5)
 
-            solve_turnstile(driver, context_name=f"服务器#{idx+1} 续期弹窗")
-            human_sleep(1.5, 2.5)
+            # 续期弹窗内部的 Turnstile
+            print(f"  🛡️ 等待服务器#{idx+1} 弹窗验证码完成...", flush=True)
+            try:
+                driver.uc_gui_click_cf()
+            except Exception:
+                pass
+            human_sleep(2.0, 3.5)
 
             confirm_xpath = "//button[contains(., 'CONFIRMAR') or contains(., 'Confirmar') or contains(., 'RENOVACIÓN')]"
             confirm_btn = driver.find_elements(By.XPATH, confirm_xpath)
             if confirm_btn and confirm_btn[0].is_displayed():
-                print("  🚀 拟真确认点击 [CONFIRMAR RENOVACIÓN]...", flush=True)
+                print("  🚀 确认点击 [CONFIRMAR RENOVACIÓN]...", flush=True)
                 human_click(driver, confirm_btn[0])
                 human_sleep(3.5, 5.0)
 
+        # 刷新检查
         driver.refresh()
         human_sleep(4.0, 5.0)
         status_after = get_servers_info(driver)
