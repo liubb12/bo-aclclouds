@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动登录与服务器续期脚本 (最终完善版)
+# ACLClouds 自动登录与服务器续期脚本 (集成 OCR 自动点选验证码版)
 # ============================================================
 import os
 import re
 import html
 import time
-import socket
 import subprocess
 import requests
 from datetime import datetime, timezone, timedelta
@@ -15,6 +14,15 @@ from seleniumbase import Driver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
+
+# 动态加载 ddddocr
+try:
+    import ddddocr
+    from PIL import Image
+    import io
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
 
 BASE_URL = "https://aclclouds.com"
 LOGIN_URL = f"{BASE_URL}/auth/login"
@@ -99,7 +107,6 @@ def start_gost(socks_proxy: str) -> subprocess.Popen:
 
 
 def get_expire_info(driver) -> str:
-    """提取页面到期信息"""
     expire_info = "未知"
     try:
         body_text = driver.get_text("body").replace("\u00a0", " ").replace("\u202f", " ")
@@ -133,10 +140,30 @@ def set_input_value(driver, element, value):
         pass
 
 
+def ocr_recognize_image(image_bytes: bytes) -> str:
+    """使用 ddddocr 识别小图内容"""
+    if not OCR_AVAILABLE:
+        return ""
+    try:
+        ocr = ddddocr.DdddOcr(show_ad=False)
+        res = ocr.classification(image_bytes)
+        return res.strip()
+    except Exception as e:
+        print(f"OCR 识别单图出错: {e}")
+        return ""
+
+
 def solve_acl_custom_captcha(driver, context_name="登录页"):
-    """精准定位并点击 'I am not a robot' 复选框"""
+    """
+    自研验证码全流程处理：
+    1. 点击复选框
+    2. 检测是否弹出了题目卡片 (如 Click on Panel)
+    3. 若弹出，抓取 4 个选项进行 OCR 比对并点击匹配项
+    4. 等待 Verified 状态
+    """
     print(f"  🛡️ 正在处理 [{context_name}] 的 'I am not a robot' 验证码...", flush=True)
-    
+
+    # 1. 物理点击复选框
     clicked = driver.execute_script("""
         const candidates = Array.from(document.querySelectorAll('*')).filter(el => {
             const txt = (el.innerText || el.textContent || '').trim();
@@ -157,15 +184,91 @@ def solve_acl_custom_captcha(driver, context_name="登录页"):
 
     if clicked:
         print(f"  👉 [{context_name}] 已派发物理事件点击验证码方框，等待响应...", flush=True)
-        time.sleep(4)
+        time.sleep(3)
     else:
         try:
             box_elem = driver.find_element(By.XPATH, "//*[contains(text(), 'not a robot')]/..")
             ActionChains(driver).move_to_element(box_elem).click().perform()
             print(f"  👉 [{context_name}] XPath 点击完成", flush=True)
-            time.sleep(4)
+            time.sleep(3)
         except Exception:
             pass
+
+    # 2. 检测并处理二次点选答题卡
+    try:
+        prompt_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'Click on') or contains(text(), 'click on')]")
+        if prompt_elements and any(el.is_displayed() for el in prompt_elements):
+            target_element = next(el for el in prompt_elements if el.is_displayed())
+            prompt_text = target_element.text.strip()
+            print(f"  🧩 发现二次验证点选题: {prompt_text}", flush=True)
+
+            # 提取目标关键词 (如 Click on Panel -> Panel)
+            match = re.search(r'[Cc]lick on\s+([A-Za-z0-9_-]+)', prompt_text)
+            if match:
+                target_word = match.group(1).strip().lower()
+                print(f"  🎯 目标关键字为: [{target_word}]", flush=True)
+
+                # 寻找该题目下方的选项卡片元素
+                # 选项卡片通常包含 img, canvas 或是带有 cursor-pointer 的容器
+                candidate_cards = driver.find_elements(
+                    By.XPATH, 
+                    "//div[contains(@class, 'grid') or contains(@class, 'captcha')]//div[contains(@class, 'cursor-pointer')] | //div[contains(@class, 'cursor-pointer') and (.//img or .//canvas)]"
+                )
+
+                if not candidate_cards:
+                    # 备选查找策略
+                    candidate_cards = driver.find_elements(By.XPATH, "//*[contains(text(), 'Click on')]/ancestor::div[1]//div[.//img or .//canvas]")
+
+                print(f"  🔍 检测到 {len(candidate_cards)} 个候选卡片，开始 OCR 图像比对...", flush=True)
+
+                matched_card = None
+                for idx, card in enumerate(candidate_cards):
+                    # 优先检查是否存在直接的文本
+                    card_text = card.text.strip().lower()
+                    if target_word in card_text:
+                        print(f"  ✨ 卡片 #{idx+1} 匹配到纯文本: {card_text}")
+                        matched_card = card
+                        break
+
+                    # 若无纯文本，对卡片进行截图并 OCR
+                    if OCR_AVAILABLE:
+                        try:
+                            card_png = card.screenshot_as_png
+                            ocr_result = ocr_recognize_image(card_png).lower()
+                            print(f"  🔍 卡片 #{idx+1} OCR 识别结果: [{ocr_result}]")
+                            if target_word in ocr_result or ocr_result in target_word:
+                                print(f"  ✨ 卡片 #{idx+1} OCR 成功命中关键字: {target_word}")
+                                matched_card = card
+                                break
+                        except Exception as ocr_err:
+                            print(f"  ⚠️ 卡片 #{idx+1} 截图/OCR 异常: {ocrcr_err}")
+
+                if matched_card:
+                    # 派发物理点击
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", matched_card)
+                    time.sleep(0.5)
+                    try:
+                        matched_card.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", matched_card)
+                    print(f"  ✅ 已精准点击目标卡片: {target_word}", flush=True)
+                    time.sleep(3)
+                else:
+                    print("  ⚠️ 未能准确定位到匹配卡片，将尝试盲点第一个备选以触发重刷")
+                    if candidate_cards:
+                        candidate_cards[0].click()
+                        time.sleep(2)
+    except Exception as e:
+        print(f"  ℹ️ 点选验证阶段跳过或未触发题目: {e}")
+
+    # 3. 验证是否变成 Verified
+    for _ in range(5):
+        body_str = driver.get_text("body")
+        if "Verified" in body_str:
+            print("  🟢 验证码已成功变为 Verified 状态！", flush=True)
+            return True
+        time.sleep(1)
+    return False
 
 
 def main():
@@ -205,6 +308,7 @@ def main():
         print("  📝 已填入密码", flush=True)
         time.sleep(1)
 
+        # 处理验证码与可能的点选题
         solve_acl_custom_captcha(driver, context_name="登录页")
         time.sleep(2)
 
