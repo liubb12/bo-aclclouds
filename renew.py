@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动续期脚本 (WARP 通道 + 人机穿透 + 遮罩防御版)
+# ACLClouds 自动续期脚本 (回归 18:09 原生架构纯净稳定版)
 # ============================================================
 import os
 import re
@@ -19,13 +19,14 @@ from selenium.webdriver.common.action_chains import ActionChains
 PANEL_URL = "https://panel.aclclouds.com"
 LOGIN_URL = f"{PANEL_URL}/auth/login"
 
-WARP_SOCKS5_PORT = 10808
 LOCAL_HTTP_PORT = 18082
-
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
+
+# 精准读取你 Secrets 里的变量
 ACL_USERNAME = os.environ.get("ACL_USERNAME", "").strip()
 ACL_PASSWORD = os.environ.get("ACL_PASSWORD", "").strip()
+SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 
 
 def human_sleep(min_s=1.0, max_s=2.0):
@@ -59,48 +60,27 @@ def tg_send(text: str, photo_path: str = None):
         print(f"  ⚠️ TG 通知发送异常: {e}", flush=True)
 
 
-def start_warp_gost() -> subprocess.Popen:
-    """启动 gost 将 WARP 的 SOCKS5 (10808) 转为 Chrome 支持的 HTTP (18082)"""
-    cmd = ["gost", "-L", f"http://127.0.0.1:{LOCAL_HTTP_PORT}", "-F", f"socks5://127.0.0.1:{WARP_SOCKS5_PORT}"]
-    print("  🚀 启动 gost 桥接本地 WARP 通道...", flush=True)
+def normalize_socks5_proxy(proxy_value: str) -> str:
+    proxy_value = (proxy_value or "").strip()
+    for prefix in ("socks5://", "socks://"):
+        if proxy_value.startswith(prefix):
+            proxy_value = proxy_value[len(prefix):]
+            break
+    if not proxy_value or ":" not in proxy_value:
+        raise ValueError("SOCKS5_PROXY 格式错误。")
+    return proxy_value
+
+
+def start_gost(socks_proxy: str) -> subprocess.Popen:
+    normalized = normalize_socks5_proxy(socks_proxy)
+    cmd = ["gost", "-L", f"http://127.0.0.1:{LOCAL_HTTP_PORT}", "-F", f"socks5://{normalized}"]
+    print("  🚀 启动 gost 代理中转...", flush=True)
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(2)
     if proc.poll() is not None:
         raise RuntimeError("gost 启动失败。")
-    print(f"  ✅ WARP HTTP 代理就绪: http://127.0.0.1:{LOCAL_HTTP_PORT}", flush=True)
+    print(f"  ✅ gost 已启动，本地代理端口：{LOCAL_HTTP_PORT}", flush=True)
     return proc
-
-
-def click_turnstile_checkbox(driver, timeout=20):
-    """穿透点击 Cloudflare Turnstile 验证框"""
-    print("  🛡️ 检测 Cloudflare 验证盾并尝试点击...", flush=True)
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            driver.switch_to.default_content()
-            iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            for f in iframes:
-                src = f.get_attribute("src") or ""
-                if any(k in src for k in ("cloudflare", "turnstile", "challenges")):
-                    driver.switch_to.frame(f)
-                    time.sleep(0.3)
-                    boxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox'], #checkbox, .ctp-checkbox-label")
-                    if boxes:
-                        ActionChains(driver).move_to_element(boxes[0]).pause(0.2).click().perform()
-                        print("  🎯 成功切入 iframe 物理点击 Turnstile 复选框！", flush=True)
-                    driver.switch_to.default_content()
-                    return True
-        except Exception:
-            driver.switch_to.default_content()
-
-        try:
-            driver.uc_gui_click_cf()
-            return True
-        except Exception:
-            pass
-
-        time.sleep(2)
-    return False
 
 
 def human_type(driver, element, text: str):
@@ -158,7 +138,7 @@ def extract_remaining_time(driver) -> str:
 
 
 def trigger_renew(driver):
-    """强力触发 Renew 按钮及二次确认模态框"""
+    """强力触发 Renew 按钮"""
     dismiss_annoying_popups(driver)
 
     renew_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Renew')]")
@@ -177,9 +157,8 @@ def trigger_renew(driver):
     print("  ⚡ 已向 Renew 按钮派发点击事件", flush=True)
     human_sleep(2.0, 3.0)
 
-    # 捕获并确认二次确认弹窗
-    confirm_keywords = ["confirm", "yes", "确定", "renew", "continue"]
-    for kw in confirm_keywords:
+    # 如果有二次确认框则自动点掉
+    for kw in ["confirm", "yes", "确定", "renew", "continue"]:
         try:
             modals = driver.find_elements(
                 By.XPATH,
@@ -198,33 +177,32 @@ def trigger_renew(driver):
 
 
 def main():
-    print("=== ACLClouds 自动续期任务启动 (WARP 增强版) ===", flush=True)
+    print("=== ACLClouds 自动续期任务启动 ===", flush=True)
     if not ACL_USERNAME or not ACL_PASSWORD:
-        print("❌ 未检测到登录凭据！请检查 ACL_USERNAME 与 ACL_PASSWORD", flush=True)
+        print("❌ 未检测到 ACL_USERNAME 或 ACL_PASSWORD Secrets", flush=True)
         return
 
     gost_proc = None
-    try:
-        gost_proc = start_warp_gost()
-    except Exception as e:
-        print(f"⚠️ gost 桥接失败: {e}", flush=True)
+    uc_proxy = None
 
-    uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
+    if SOCKS5_PROXY:
+        try:
+            gost_proc = start_gost(SOCKS5_PROXY)
+            uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
+        except Exception as e:
+            print(f"⚠️ gost 启动失败: {e}", flush=True)
+
     driver = Driver(uc=True, headless=False, proxy=uc_proxy)
 
     try:
-        # 1. 打开登录页面
-        print(f"🌐 访问控制面板: {LOGIN_URL} ...", flush=True)
-        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=8)
-        human_sleep(3.0, 5.0)
-
-        # 检查是否遇到 Cloudflare 质询盾
-        click_turnstile_checkbox(driver, timeout=15)
-        human_sleep(2.0, 3.0)
+        # 1. 打开面板页面
+        print(f"🌐 访问控制面板: {PANEL_URL} ...", flush=True)
+        driver.uc_open_with_reconnect(PANEL_URL, reconnect_time=8)
+        human_sleep(4.0, 6.0)
 
         # 2. 账号密码登录
         if "/auth/login" in driver.current_url:
-            print("🔑 输入账号密码进行登录...", flush=True)
+            print("🔑 执行账号密码登录...", flush=True)
             user_input = driver.wait_for_element_visible(
                 "input[name='username'], input[type='text'], input[type='email']", timeout=20
             )
@@ -239,42 +217,39 @@ def main():
                 By.XPATH, "//button[@type='submit' or contains(., 'Login') or contains(., 'Log In')]"
             )
             driver.execute_script("arguments[0].click();", submit_btn)
-            print("  🚀 已点击登录，等待跳转...", flush=True)
+            print("  🚀 点击登录完成，等待跳转...", flush=True)
             human_sleep(5.0, 7.0)
 
-            # 再次检查登录后可能弹出的 CF 验证盾
-            click_turnstile_checkbox(driver, timeout=10)
-
-        # 3. 进入服务器实例控制台
+        # 3. 进入控制台
         dismiss_annoying_popups(driver)
         if "/server/" not in driver.current_url:
             server_cards = driver.find_elements(By.XPATH, "//a[contains(@href, '/server/')]")
             if server_cards:
-                print("🖥️ 从列表进入服务器实例控制台...", flush=True)
+                print("🖥️ 进入服务器实例控制台...", flush=True)
                 driver.execute_script("arguments[0].click();", server_cards[0])
                 human_sleep(5.0, 7.0)
 
         dismiss_annoying_popups(driver)
 
-        # 4. 获取续期前剩余时间
+        # 4. 获取续期前时间
         before_time = extract_remaining_time(driver)
-        print(f"⏳ 续期前剩余时间: {before_time}", flush=True)
+        print(f"⏳ 当前剩余到期时间: {before_time}", flush=True)
 
         # 5. 执行续期点击
         trigger_renew(driver)
 
-        # 6. 等待 6 秒后端结算，然后强制刷新页面
-        print("⏳ 等待 6 秒后端结算，准备刷新界面...", flush=True)
+        # 6. 等待并刷新
+        print("⏳ 等待 6 秒后端处理，准备刷新界面...", flush=True)
         time.sleep(6)
         driver.refresh()
         human_sleep(4.0, 6.0)
         dismiss_annoying_popups(driver)
 
-        # 7. 获取续期后剩余时间
+        # 7. 获取刷新后时间
         after_time = extract_remaining_time(driver)
         print(f"📊 刷新后剩余时间: {after_time}", flush=True)
 
-        # 8. 保存控制台截图并推送到 Telegram
+        # 8. 保存截图并推送 Telegram
         driver.save_screenshot("acl_final.png")
         now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -289,7 +264,7 @@ def main():
             f"⏰ <b>执行时间：</b><code>{now_time}</code>",
             photo_path="acl_final.png"
         )
-        print("🎉 任务完成并已推送状态到 Telegram。", flush=True)
+        print("🎉 任务顺利完成，已推送到 Telegram！", flush=True)
 
     except Exception as e:
         err = str(e)
