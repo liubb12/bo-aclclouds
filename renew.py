@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动续期脚本 (增强版：修复遮挡/二次确认/刷新判定)
+# ACLClouds 自动续期脚本 (完整兼容版)
 # ============================================================
 import os
 import re
+import json
 import html
 import time
 import random
@@ -23,8 +24,10 @@ LOCAL_HTTP_PORT = 18082
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 
-ACL_EMAIL = os.environ.get("ACL_EMAIL", "").strip()
+# 兼容现有的 ACL_USERNAME 与 ACL_EMAIL，同时读取 ACL_COOKIES
+ACL_USERNAME = os.environ.get("ACL_USERNAME", "").strip() or os.environ.get("ACL_EMAIL", "").strip()
 ACL_PASSWORD = os.environ.get("ACL_PASSWORD", "").strip()
+ACL_COOKIES = os.environ.get("ACL_COOKIES", "").strip()
 SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 
 
@@ -100,10 +103,13 @@ def human_type(driver, element, text: str):
 
 
 def dismiss_annoying_popups(driver):
-    """清理遮挡点击的弹窗（如 PWA 安装提示、提示浮层）"""
+    """清理遮挡点击的弹窗（如 PWA 安装提示）"""
     try:
-        # 关闭形如 "Install the panel on your home screen" 等弹窗
-        close_btns = driver.find_elements(By.XPATH, "//button[translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='close' or contains(., 'Close') or contains(., 'Dismiss') or contains(., 'Cancel')]")
+        close_btns = driver.find_elements(
+            By.XPATH,
+            "//button[translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='close' "
+            "or contains(., 'Close') or contains(., 'Dismiss') or contains(., 'Cancel')]"
+        )
         for btn in close_btns:
             if btn.is_displayed():
                 driver.execute_script("arguments[0].click();", btn)
@@ -114,16 +120,17 @@ def dismiss_annoying_popups(driver):
 
 
 def extract_remaining_time(driver) -> str:
-    """提取剩余时间文本"""
+    """提取剩余到期时间"""
     dismiss_annoying_popups(driver)
     try:
-        # 匹配包含 "Time remaining:" 的区块
-        elem = driver.find_element(By.XPATH, "//*[contains(text(), 'Time remaining')]/.. | //*[contains(text(), 'Time remaining')]")
+        elem = driver.find_element(
+            By.XPATH,
+            "//*[contains(text(), 'Time remaining')]/.. | //*[contains(text(), 'Time remaining')]"
+        )
         text = elem.text.strip()
         match = re.search(r'Time remaining:\s*([^\n\r]+)', text, re.IGNORECASE)
         if match:
             return match.group(1).strip()
-        # 备选匹配直接出现的时间模式如 1d 19h
         time_match = re.search(r'(\d+\s*d\s*\d+\s*h)', text)
         if time_match:
             return time_match.group(1)
@@ -133,10 +140,9 @@ def extract_remaining_time(driver) -> str:
 
 
 def trigger_renew(driver):
-    """强力触发续期及可能伴随的模态确认框"""
+    """强力触发 Renew 按钮及二次确认"""
     dismiss_annoying_popups(driver)
 
-    # 1. 定位 Renew 按钮
     renew_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Renew')]")
     if not renew_btns:
         print("  ⚠️ 未在页面找到 Renew 按钮", flush=True)
@@ -145,7 +151,6 @@ def trigger_renew(driver):
     renew_btn = renew_btns[0]
     print("  👉 找到 Renew 按钮，准备触发点击...", flush=True)
 
-    # 尝试原生移动点击 + JS 强制点击双重保险
     try:
         ActionChains(driver).move_to_element(renew_btn).pause(0.3).click().perform()
     except Exception:
@@ -154,11 +159,14 @@ def trigger_renew(driver):
     print("  ⚡ 已向 Renew 按钮派发点击事件", flush=True)
     human_sleep(2.0, 3.0)
 
-    # 2. 检查是否有二次确认窗口 (Modal / SweetAlert / 对话框)
+    # 处理二次确认框 (Modal / SweetAlert / Dialog)
     confirm_keywords = ["confirm", "yes", "确定", "renew", "continue"]
     for kw in confirm_keywords:
         try:
-            modals = driver.find_elements(By.XPATH, f"//div[contains(@role, 'dialog') or contains(@class, 'modal') or contains(@class, 'swal2')]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{kw}')]")
+            modals = driver.find_elements(
+                By.XPATH,
+                f"//div[contains(@role, 'dialog') or contains(@class, 'modal') or contains(@class, 'swal2')]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{kw}')]"
+            )
             for c_btn in modals:
                 if c_btn.is_displayed():
                     print(f"  🔔 检测到二次确认框并点击: [{c_btn.text}]", flush=True)
@@ -171,10 +179,32 @@ def trigger_renew(driver):
     return True
 
 
+def apply_cookies_if_any(driver) -> bool:
+    """若提供了 ACL_COOKIES，尝试注入免登"""
+    if not ACL_COOKIES:
+        return False
+    try:
+        cookies_data = json.loads(ACL_COOKIES)
+        if isinstance(cookies_data, dict):
+            cookies_data = [{"name": k, "value": v} for k, v in cookies_data.items()]
+        for c in cookies_data:
+            cookie_dict = {"name": c.get("name"), "value": c.get("value")}
+            if "domain" in c:
+                cookie_dict["domain"] = c["domain"]
+            driver.add_cookie(cookie_dict)
+        print("  🍪 已注入 Cookies，正在刷新页面...", flush=True)
+        driver.refresh()
+        human_sleep(3.0, 5.0)
+        return True
+    except Exception as e:
+        print(f"  ⚠️ Cookie 注入解析失败: {e}", flush=True)
+        return False
+
+
 def main():
     print("=== ACLClouds 自动续期任务启动 ===", flush=True)
-    if not ACL_EMAIL or not ACL_PASSWORD:
-        print("❌ 未配置 ACL_EMAIL 或 ACL_PASSWORD Secrets", flush=True)
+    if not (ACL_USERNAME and ACL_PASSWORD) and not ACL_COOKIES:
+        print("❌ 未配置登录凭据 (ACL_USERNAME/ACL_PASSWORD 或 ACL_COOKIES)", flush=True)
         return
 
     gost_proc = None
@@ -190,27 +220,41 @@ def main():
     driver = Driver(uc=True, headless=False, proxy=uc_proxy)
 
     try:
-        # 1. 打开登录页面
-        print(f"🌐 访问控制面板: {LOGIN_URL} ...", flush=True)
-        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=6)
+        # 1. 访问面板页面
+        print(f"🌐 访问控制面板: {PANEL_URL} ...", flush=True)
+        driver.uc_open_with_reconnect(PANEL_URL, reconnect_time=6)
         human_sleep(3.0, 5.0)
 
-        # 2. 登录处理
-        if "/auth/login" in driver.current_url:
-            print("  🔑 输入登录凭据...", flush=True)
-            user_input = driver.wait_for_element_visible("input[name='username'], input[type='text'], input[type='email']", timeout=20)
-            human_type(driver, user_input, ACL_EMAIL)
+        # 2. 尝试 Cookies 免登，失效则密码登录
+        is_logged_in = "/auth/login" not in driver.current_url
+        if not is_logged_in and ACL_COOKIES:
+            apply_cookies_if_any(driver)
+            is_logged_in = "/auth/login" not in driver.current_url
 
-            pwd_input = driver.wait_for_element_visible("input[name='password'], input[type='password']", timeout=10)
+        if not is_logged_in:
+            print("  🔑 执行常规账号密码登录...", flush=True)
+            if "/auth/login" not in driver.current_url:
+                driver.get(LOGIN_URL)
+                human_sleep(3.0, 5.0)
+
+            user_input = driver.wait_for_element_visible(
+                "input[name='username'], input[type='text'], input[type='email']", timeout=20
+            )
+            human_type(driver, user_input, ACL_USERNAME)
+
+            pwd_input = driver.wait_for_element_visible(
+                "input[name='password'], input[type='password']", timeout=10
+            )
             human_type(driver, pwd_input, ACL_PASSWORD)
 
-            submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'Login') or contains(., 'Log In')]")
+            submit_btn = driver.find_element(
+                By.XPATH, "//button[@type='submit' or contains(., 'Login') or contains(., 'Log In')]"
+            )
             driver.execute_script("arguments[0].click();", submit_btn)
             human_sleep(4.0, 6.0)
 
-        # 3. 进入服务器控制台界面
+        # 3. 确保进入服务器控制台
         dismiss_annoying_popups(driver)
-        # 如果还在首页，点击第一台服务器卡片进入控制台
         if "/server/" not in driver.current_url:
             server_cards = driver.find_elements(By.XPATH, "//a[contains(@href, '/server/')]")
             if server_cards:
@@ -220,29 +264,28 @@ def main():
 
         dismiss_annoying_popups(driver)
 
-        # 4. 读取续期前时间
+        # 4. 记录续期前时间
         before_time = extract_remaining_time(driver)
         print(f"⏳ 当前剩余到期时间: {before_time}", flush=True)
 
-        # 5. 执行续期点击
-        clicked = trigger_renew(driver)
+        # 5. 执行续期
+        trigger_renew(driver)
 
-        # 关键修正：给服务器后端充足的落库和结算时间（等待 6 秒后强制刷新）
-        print("  ⏳ 等待后端接口处理并强制刷新界面...", flush=True)
+        # 6. 等待后端落库并刷新获取最新状态
+        print("  ⏳ 等待 6 秒后端结算，准备刷新界面...", flush=True)
         time.sleep(6)
         driver.refresh()
         human_sleep(4.0, 6.0)
         dismiss_annoying_popups(driver)
 
-        # 6. 读取续期后时间
+        # 7. 记录续期后时间
         after_time = extract_remaining_time(driver)
         print(f"📊 刷新后剩余到期时间: {after_time}", flush=True)
 
-        # 7. 保存现场并推送 Telegram
+        # 8. 截图并发送 Telegram 通知
         driver.save_screenshot("acl_final.png")
         now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
-        # 判断续期结果
         if before_time != after_time and "未知" not in after_time:
             status_title = "🎉 <b>ACLClouds 续期成功！</b>"
         else:
@@ -254,7 +297,7 @@ def main():
             f"⏰ <b>执行时间：</b><code>{now_time}</code>",
             photo_path="acl_final.png"
         )
-        print("🎉 任务完成并已推送状态。", flush=True)
+        print("🎉 任务完成并已推送状态到 Telegram。", flush=True)
 
     except Exception as e:
         err = str(e)
