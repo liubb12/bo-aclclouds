@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# ============================================================
+# ACLClouds 自动续期脚本 (纯账号密码稳定版)
+# ============================================================
 import os
 import re
-import json
 import html
 import time
 import random
@@ -11,29 +13,35 @@ import requests
 from datetime import datetime, timezone, timedelta
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 
-BASE_PANEL_URL = "https://panel.aclclouds.com"
-LOGIN_URL = f"{BASE_PANEL_URL}/auth/login"
+PANEL_URL = "https://panel.aclclouds.com"
+LOGIN_URL = f"{PANEL_URL}/auth/login"
 
 LOCAL_HTTP_PORT = 18082
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 
-ACL_USERNAME = os.environ.get("ACL_USERNAME", "").strip() or os.environ.get("ACL_EMAIL", "").strip()
+# 直接读取你的 GitHub Secrets 变量名
+ACL_USERNAME = os.environ.get("ACL_USERNAME", "").strip()
 ACL_PASSWORD = os.environ.get("ACL_PASSWORD", "").strip()
-ACL_COOKIES = os.environ.get("ACL_COOKIES", "").strip()
 SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
+
+
+def human_sleep(min_s=1.0, max_s=2.0):
+    time.sleep(random.uniform(min_s, max_s))
 
 
 def tg_send(text: str, photo_path: str = None):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        print("⚠️ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过通知。")
         return
     try:
         if photo_path and os.path.exists(photo_path):
             url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
             with open(photo_path, "rb") as f:
-                requests.post(
+                resp = requests.post(
                     url,
                     data={"chat_id": TG_CHAT_ID, "caption": text, "parse_mode": "HTML"},
                     files={"photo": f},
@@ -41,59 +49,158 @@ def tg_send(text: str, photo_path: str = None):
                 )
         else:
             url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-            requests.post(
+            resp = requests.post(
                 url,
                 data={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"},
                 timeout=30,
             )
+        if resp.status_code == 200:
+            print("  ✅ TG 通知发送成功", flush=True)
     except Exception as e:
-        print(f"  ⚠️ TG 发送异常: {e}", flush=True)
+        print(f"  ⚠️ TG 通知发送异常: {e}", flush=True)
 
 
-def start_gost(socks_proxy: str):
-    proxy_val = socks_proxy.strip()
+def normalize_socks5_proxy(proxy_value: str) -> str:
+    proxy_value = (proxy_value or "").strip()
     for prefix in ("socks5://", "socks://"):
-        if proxy_val.startswith(prefix):
-            proxy_val = proxy_val[len(prefix):]
+        if proxy_value.startswith(prefix):
+            proxy_value = proxy_value[len(prefix):]
             break
-    cmd = ["gost", "-L", f"http://127.0.0.1:{LOCAL_HTTP_PORT}", "-F", f"socks5://{proxy_val}"]
+    if not proxy_value or ":" not in proxy_value:
+        raise ValueError("SOCKS5_PROXY 格式错误。")
+    return proxy_value
+
+
+def start_gost(socks_proxy: str) -> subprocess.Popen:
+    normalized = normalize_socks5_proxy(socks_proxy)
+    cmd = ["gost", "-L", f"http://127.0.0.1:{LOCAL_HTTP_PORT}", "-F", f"socks5://{normalized}"]
+    print("  🚀 启动 gost 代理中转...", flush=True)
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(2)
+    if proc.poll() is not None:
+        raise RuntimeError("gost 启动失败。")
+    print(f"  ✅ gost 已启动，本地代理端口：{LOCAL_HTTP_PORT}", flush=True)
     return proc
 
 
-def clean_popups(driver):
-    """清除遮罩和 PWA 弹窗"""
+def human_type(driver, element, text: str):
     try:
-        btns = driver.find_elements(By.XPATH, "//button[contains(translate(., 'CLOSE', 'close'), 'close') or contains(., 'Dismiss')]")
-        for b in btns:
-            if b.is_displayed():
-                driver.execute_script("arguments[0].click();", b)
-                time.sleep(0.5)
+        ActionChains(driver).move_to_element(element).pause(random.uniform(0.1, 0.2)).click().perform()
+        element.send_keys(Keys.CONTROL, "a")
+        element.send_keys(Keys.BACKSPACE)
+        for ch in text:
+            element.send_keys(ch)
+            time.sleep(random.uniform(0.03, 0.08))
+        driver.execute_script("""
+            const el = arguments[0];
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        """, element)
     except Exception:
         pass
 
 
-def safe_open(driver, url, max_retries=3):
-    """带网络容错与重试的页面加载"""
+def dismiss_annoying_popups(driver):
+    """清理遮挡点击的弹窗（如 PWA 安装提示等）"""
+    try:
+        close_btns = driver.find_elements(
+            By.XPATH,
+            "//button[translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='close' "
+            "or contains(., 'Close') or contains(., 'Dismiss') or contains(., 'Cancel')]"
+        )
+        for btn in close_btns:
+            if btn.is_displayed():
+                driver.execute_script("arguments[0].click();", btn)
+                print("  🧹 成功清理屏幕遮挡弹窗", flush=True)
+                human_sleep(0.5, 1.0)
+    except Exception:
+        pass
+
+
+def extract_remaining_time(driver) -> str:
+    """提取剩余到期时间"""
+    dismiss_annoying_popups(driver)
+    try:
+        elem = driver.find_element(
+            By.XPATH,
+            "//*[contains(text(), 'Time remaining')]/.. | //*[contains(text(), 'Time remaining')]"
+        )
+        text = elem.text.strip()
+        match = re.search(r'Time remaining:\s*([^\n\r]+)', text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        time_match = re.search(r'(\d+\s*d\s*\d+\s*h)', text)
+        if time_match:
+            return time_match.group(1)
+        return text.split("\n")[0]
+    except Exception:
+        return "未知"
+
+
+def trigger_renew(driver):
+    """强力触发 Renew 按钮及可能的确认弹窗"""
+    dismiss_annoying_popups(driver)
+
+    renew_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Renew')]")
+    if not renew_btns:
+        print("  ⚠️ 未在页面找到 Renew 按钮", flush=True)
+        return False
+
+    renew_btn = renew_btns[0]
+    print("  👉 找到 Renew 按钮，准备触发点击...", flush=True)
+
+    # 尝试原生移动点击 + JS 强制点击双保险
+    try:
+        ActionChains(driver).move_to_element(renew_btn).pause(0.3).click().perform()
+    except Exception:
+        pass
+    driver.execute_script("arguments[0].click();", renew_btn)
+    print("  ⚡ 已向 Renew 按钮派发点击事件", flush=True)
+    human_sleep(2.0, 3.0)
+
+    # 处理二次确认框 (SweetAlert / Modal / Dialog)
+    confirm_keywords = ["confirm", "yes", "确定", "renew", "continue"]
+    for kw in confirm_keywords:
+        try:
+            modals = driver.find_elements(
+                By.XPATH,
+                f"//div[contains(@role, 'dialog') or contains(@class, 'modal') or contains(@class, 'swal2')]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{kw}')]"
+            )
+            for c_btn in modals:
+                if c_btn.is_displayed():
+                    print(f"  🔔 检测到二次确认框并点击: [{c_btn.text}]", flush=True)
+                    driver.execute_script("arguments[0].click();", c_btn)
+                    human_sleep(2.0, 3.0)
+                    break
+        except Exception:
+            pass
+
+    return True
+
+
+def open_with_retry(driver, url, max_retries=3):
+    """网络容错打开页面，避免 ERR_CONNECTION_CLOSED 直接报错"""
     for attempt in range(1, max_retries + 1):
         try:
-            print(f"🌐 尝试访问 (第 {attempt} 次): {url} ...", flush=True)
+            print(f"🌐 访问地址 (第 {attempt} 次尝试): {url} ...", flush=True)
             driver.uc_open_with_reconnect(url, reconnect_time=8)
             time.sleep(4)
-            # 校验是否白屏或错误页
             body_text = driver.find_element(By.TAG_NAME, "body").text
             if "ERR_CONNECTION" not in body_text and "can't be reached" not in body_text:
                 return True
-            print("  ⚠️ 出现网络中断/重置，准备重试...", flush=True)
+            print("  ⚠️ 页面提示连接重置，准备重试...", flush=True)
         except Exception as e:
-            print(f"  ⚠️ 加载异常: {e}", flush=True)
+            print(f"  ⚠️ 连接抖动: {e}", flush=True)
         time.sleep(3)
     return False
 
 
 def main():
     print("=== ACLClouds 自动续期任务启动 ===", flush=True)
+    if not ACL_USERNAME or not ACL_PASSWORD:
+        print(f"❌ 未检测到登录凭据！当前 ACL_USERNAME: {'已配置' if ACL_USERNAME else '未配置'}, ACL_PASSWORD: {'已配置' if ACL_PASSWORD else '未配置'}", flush=True)
+        return
+
     gost_proc = None
     uc_proxy = None
 
@@ -101,108 +208,86 @@ def main():
         try:
             gost_proc = start_gost(SOCKS5_PROXY)
             uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
-            print(f"✅ gost 代理就绪: {LOCAL_HTTP_PORT}", flush=True)
         except Exception as e:
-            print(f"⚠️ gost 启动失败: {e}", flush=True)
+            print(f"⚠️ 代理启动失败: {e}", flush=True)
 
     driver = Driver(uc=True, headless=False, proxy=uc_proxy)
 
     try:
-        # 1. 尝试打开基础面板
-        if not safe_open(driver, BASE_PANEL_URL):
-            raise RuntimeError("网络连接失败，无法访问 panel.aclclouds.com (ERR_CONNECTION_CLOSED)")
+        # 1. 直接打开登录页面（带网络重试）
+        if not open_with_retry(driver, LOGIN_URL):
+            raise RuntimeError("网络连接失败，无法打开 ACLClouds 登录页 (ERR_CONNECTION_CLOSED)")
 
-        # 2. 注入 Cookie（如果有）
-        if ACL_COOKIES:
-            print("🍪 注入 ACL_COOKIES 免登...", flush=True)
-            try:
-                cookies = json.loads(ACL_COOKIES)
-                if isinstance(cookies, dict):
-                    cookies = [{"name": k, "value": v} for k, v in cookies.items()]
-                for c in cookies:
-                    driver.add_cookie({"name": c["name"], "value": c["value"], "domain": c.get("domain", ".aclclouds.com")})
-                driver.refresh()
-                time.sleep(4)
-            except Exception as e:
-                print(f"  ⚠️ Cookies 注入失败: {e}", flush=True)
+        human_sleep(3.0, 5.0)
 
-        # 3. 如果没登进去，尝试走账号密码
-        if "/auth/login" in driver.current_url:
-            print("🔑 使用账号密码登录...", flush=True)
-            user_in = driver.wait_for_element_visible("input[name='username'], input[type='text']", timeout=15)
-            user_in.clear()
-            user_in.send_keys(ACL_USERNAME)
-            pwd_in = driver.wait_for_element_visible("input[name='password'], input[type='password']", timeout=10)
-            pwd_in.clear()
-            pwd_in.send_keys(ACL_PASSWORD)
-            sub_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'Log In')]")
-            driver.execute_script("arguments[0].click();", sub_btn)
-            time.sleep(5)
+        # 2. 账号密码登录
+        print("🔑 输入账号密码登录...", flush=True)
+        user_input = driver.wait_for_element_visible(
+            "input[name='username'], input[type='text'], input[type='email']", timeout=20
+        )
+        human_type(driver, user_input, ACL_USERNAME)
 
-        # 4. 进入实例控制台
-        clean_popups(driver)
+        pwd_input = driver.wait_for_element_visible(
+            "input[name='password'], input[type='password']", timeout=10
+        )
+        human_type(driver, pwd_input, ACL_PASSWORD)
+
+        submit_btn = driver.find_element(
+            By.XPATH, "//button[@type='submit' or contains(., 'Login') or contains(., 'Log In')]"
+        )
+        driver.execute_script("arguments[0].click();", submit_btn)
+        print("  🚀 已点击登录按钮，等待跳转...", flush=True)
+        human_sleep(5.0, 7.0)
+
+        # 3. 进入服务器实例控制台
+        dismiss_annoying_popups(driver)
         if "/server/" not in driver.current_url:
-            cards = driver.find_elements(By.XPATH, "//a[contains(@href, '/server/')]")
-            if cards:
-                print("🖥️ 点击进入实例控制台...", flush=True)
-                driver.execute_script("arguments[0].click();", cards[0])
-                time.sleep(5)
+            server_cards = driver.find_elements(By.XPATH, "//a[contains(@href, '/server/')]")
+            if server_cards:
+                print("🖥️ 从列表进入服务器实例控制台...", flush=True)
+                driver.execute_script("arguments[0].click();", server_cards[0])
+                human_sleep(5.0, 7.0)
 
-        clean_popups(driver)
+        dismiss_annoying_popups(driver)
 
-        # 5. 读取续期前时间
-        def get_time():
-            try:
-                el = driver.find_element(By.XPATH, "//*[contains(text(), 'Time remaining')]/..")
-                m = re.search(r'(\d+\s*d\s*\d+\s*h)', el.text)
-                return m.group(1) if m else el.text.split("\n")[0]
-            except Exception:
-                return "未知"
-
-        before_time = get_time()
+        # 4. 获取续期前剩余时间
+        before_time = extract_remaining_time(driver)
         print(f"⏳ 续期前剩余时间: {before_time}", flush=True)
 
-        # 6. 点击 Renew 按钮
-        renew_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Renew')]")
-        if renew_btns:
-            print("👉 找到 Renew 按钮，触发点击...", flush=True)
-            driver.execute_script("arguments[0].click();", renew_btns[0])
-            time.sleep(2)
-            # 点击可能的弹窗确认
-            for kw in ("confirm", "yes", "renew"):
-                c_btns = driver.find_elements(By.XPATH, f"//div[contains(@class, 'swal2') or contains(@role, 'dialog')]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{kw}')]")
-                for cb in c_btns:
-                    if cb.is_displayed():
-                        driver.execute_script("arguments[0].click();", cb)
-                        time.sleep(2)
-                        break
-        else:
-            print("⚠️ 未发现 Renew 按钮（可能不在窗口期或未加载完成）", flush=True)
+        # 5. 执行续期点击
+        trigger_renew(driver)
 
-        # 7. 等待落库并刷新确认
+        # 6. 关键：等待 6 秒后端异步更新，然后强制刷新页面
+        print("⏳ 等待 6 秒后端结算，准备刷新界面...", flush=True)
         time.sleep(6)
         driver.refresh()
-        time.sleep(4)
-        clean_popups(driver)
+        human_sleep(4.0, 6.0)
+        dismiss_annoying_popups(driver)
 
-        after_time = get_time()
+        # 7. 获取续期后剩余时间
+        after_time = extract_remaining_time(driver)
         print(f"📊 刷新后剩余时间: {after_time}", flush=True)
 
-        # 8. 保存截图并推送
+        # 8. 保存控制台截图并推送到 Telegram
         driver.save_screenshot("acl_final.png")
         now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
-        status_text = "🎉 <b>ACLClouds 续期成功！</b>" if before_time != after_time and "未知" not in after_time else "📋 <b>ACLClouds 自动巡检报备</b>"
+        if before_time != after_time and "未知" not in after_time:
+            status_title = "🎉 <b>ACLClouds 续期成功！</b>"
+        else:
+            status_title = "📋 <b>ACLClouds 自动巡检报备</b>"
+
         tg_send(
-            f"{status_text}\n\n"
+            f"{status_title}\n\n"
             f"⌛ <b>到期变动：</b>剩余 <code>{before_time}</code> ➜ 剩余 <code>{after_time}</code>\n"
             f"⏰ <b>执行时间：</b><code>{now_time}</code>",
             photo_path="acl_final.png"
         )
+        print("🎉 任务完成并已推送状态到 Telegram。", flush=True)
 
     except Exception as e:
         err = str(e)
-        print(f"❌ 运行报错: {err}", flush=True)
+        print(f"❌ 运行发生异常: {err}", flush=True)
         try:
             driver.save_screenshot("acl_error.png")
             tg_send(f"🔴 <b>ACLClouds 运行异常</b>\n\n<code>{html.escape(err)}</code>", photo_path="acl_error.png")
