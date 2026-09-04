@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动登录与服务器续期脚本 (OCR 模糊比对最终版 + 遮挡修复)
+# ACLClouds 自动登录与服务器续期脚本 (弹窗等待与二次提交完整版)
 # ============================================================
 import os
 import re
@@ -105,7 +105,7 @@ def start_gost(socks_proxy: str) -> subprocess.Popen:
 
 
 def dismiss_pwa_popups(driver):
-    """清理截图右下角出现的 'Install the panel on your home screen' 弹窗"""
+    """清理遮挡点击的弹窗"""
     try:
         btns = driver.find_elements(
             By.XPATH,
@@ -190,20 +190,32 @@ def solve_acl_custom_captcha(driver, context_name="登录页"):
 
     if clicked:
         print(f"  👉 [{context_name}] 已派发物理事件点击验证码方框，等待响应...", flush=True)
-        time.sleep(3)
+        time.sleep(2)
     else:
         try:
             box_elem = driver.find_element(By.XPATH, "//*[contains(text(), 'not a robot')]/..")
             ActionChains(driver).move_to_element(box_elem).click().perform()
             print(f"  👉 [{context_name}] XPath 点击完成", flush=True)
-            time.sleep(3)
+            time.sleep(2)
         except Exception:
             pass
 
-    try:
+    # 轮询等待点选题或 Verified 状态出现（最长等待 10 秒）
+    target_element = None
+    for _ in range(10):
         prompt_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'Click on') or contains(text(), 'click on')]")
-        if prompt_elements and any(el.is_displayed() for el in prompt_elements):
-            target_element = next(el for el in prompt_elements if el.is_displayed())
+        visible_prompts = [el for el in prompt_elements if el.is_displayed()]
+        if visible_prompts:
+            target_element = visible_prompts[0]
+            break
+        body_str = driver.get_text("body")
+        if "Verified" in body_str:
+            print(f"  🟢 [{context_name}] 无需二次点选，直接变为 Verified 状态！", flush=True)
+            return True
+        time.sleep(1)
+
+    if target_element:
+        try:
             prompt_text = target_element.text.strip()
             print(f"  🧩 发现二次验证点选题: {prompt_text}", flush=True)
 
@@ -283,13 +295,13 @@ def solve_acl_custom_captcha(driver, context_name="登录页"):
                     time.sleep(3)
                 else:
                     print(f"  ⚠️ 最高相似度仅为 {best_score:.2f}，未找到足够匹配的卡片", flush=True)
-    except Exception as e:
-        print(f"  ℹ️ 点选验证阶段处理结束: {e}", flush=True)
+        except Exception as e:
+            print(f"  ℹ️ 点选验证阶段处理结束: {e}", flush=True)
 
-    for _ in range(6):
+    for _ in range(8):
         body_str = driver.get_text("body")
         if "Verified" in body_str:
-            print("  🟢 验证码已成功变为 Verified 状态！", flush=True)
+            print(f"  🟢 [{context_name}] 验证码已成功变为 Verified 状态！", flush=True)
             return True
         time.sleep(1)
     return False
@@ -398,20 +410,41 @@ def main():
             renew_elements[0].click()
         except Exception:
             driver.execute_script("arguments[0].click();", renew_elements[0])
-        time.sleep(3)
+        time.sleep(2)
 
         # 4. 处理 Anti-bot confirmation 弹窗
         print("🔍 检查 Anti-bot confirmation 弹窗...", flush=True)
+        time.sleep(2)
+        
+        # 弹窗内验证
         solve_acl_custom_captcha(driver, context_name="Anti-bot 弹窗")
+        time.sleep(2)
 
+        # 点击弹窗内的确认提交按钮 (Confirm / Renew / Submit 等)
+        try:
+            confirm_btns = driver.find_elements(
+                By.XPATH,
+                "//div[contains(@role, 'dialog') or contains(@class, 'modal') or contains(@class, 'swal2')]//button[not(contains(translate(., 'CANCEL', 'cancel'), 'cancel')) and not(contains(translate(., 'CLOSE', 'close'), 'close'))]"
+            )
+            for c_btn in confirm_btns:
+                if c_btn.is_displayed():
+                    btn_text = c_btn.text.strip()
+                    print(f"  👉 点击弹窗提交确认按钮: [{btn_text}]", flush=True)
+                    driver.execute_script("arguments[0].click();", c_btn)
+                    time.sleep(3)
+                    break
+        except Exception as e:
+            print(f"  ℹ️ 点击弹窗确认按钮检测: {e}")
+
+        # 等待弹窗完全关闭
         for _ in range(8):
             dialog_open = driver.execute_script("return !!document.querySelector('div[role=\"dialog\"], .modal, .swal2-modal');")
             if not dialog_open:
                 break
             time.sleep(1)
 
-        # 5. 刷新页面检查最新天数
-        time.sleep(3)
+        # 5. 等待后端落库并刷新页面检查最新天数
+        time.sleep(5)
         driver.refresh()
         time.sleep(4)
         dismiss_pwa_popups(driver)
