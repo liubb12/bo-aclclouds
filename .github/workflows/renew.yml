@@ -3,7 +3,7 @@ name: ACLClouds Auto Renew
 on:
   schedule:
     - cron: '0 2 */2 * *'  # 每 2 天执行一次
-  workflow_dispatch:       # 支持手动点击测试
+  workflow_dispatch:       # 手动测试
 
 jobs:
   renew:
@@ -14,31 +14,28 @@ jobs:
       - name: 检出仓库代码
         uses: actions/checkout@v4
 
-      - name: 安装 Python 运行环境
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: 安装 Chrome 浏览器
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget curl xvfb
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
+          sudo apt-get install -y xvfb
 
-      - name: 安装 gost (Proxy)
+      - name: Install Python Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install seleniumbase requests
+          sbase install chromedriver
+
+      - name: Install gost (Proxy)
         run: |
           wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
           gzip -d gost-linux-amd64-2.11.5.gz
           sudo mv gost-linux-amd64-2.11.5 /usr/local/bin/gost
           chmod +x /usr/local/bin/gost
-
-      - name: 安装 Python 依赖
-        run: |
-          pip install --upgrade pip
-          pip install seleniumbase requests
 
       - name: Run Renew Script
         env:
