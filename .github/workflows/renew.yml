@@ -2,8 +2,8 @@ name: ACLClouds Auto Renew
 
 on:
   schedule:
-    - cron: '0 2 */2 * *'  # 每 2 天执行一次
-  workflow_dispatch:       # 手动测试
+    - cron: '0 */6 * * *'  # 每 6 小时自动运行巡检一次
+  workflow_dispatch:       # 支持随时手动点击测试
 
 jobs:
   renew:
@@ -27,7 +27,7 @@ jobs:
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
-          pip install seleniumbase requests
+          pip install seleniumbase requests ddddocr
           sbase install chromedriver
 
       - name: Install gost (Proxy)
