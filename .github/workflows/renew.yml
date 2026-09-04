@@ -1,9 +1,9 @@
-name: ACLClouds Auto Renew (WARP Mode)
+name: ACLClouds Auto Renew
 
 on:
   schedule:
-    - cron: '0 2 */2 * *'  # 每 2 天执行一次（与 EKNodes 节奏一致）
-  workflow_dispatch:       # 支持手动触发测试
+    - cron: '0 2 */2 * *'  # 每 2 天执行一次
+  workflow_dispatch:       # 支持手动点击测试
 
 jobs:
   renew:
@@ -28,17 +28,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
 
-      - name: 启动 Cloudflare WARP 客户端
-        uses: fscarmen/warp-action@v1
-        with:
-          mode: socks5
-          port: 10808
-
-      - name: 安装 gost 代理协议转换
+      - name: 安装 gost (Proxy)
         run: |
-          wget -q https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20240125/gost_3.0.0-nightly.20240125_linux_amd64.tar.gz -O gost.tar.gz
-          tar -zxvf gost.tar.gz
-          sudo mv gost /usr/local/bin/
+          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+          gzip -d gost-linux-amd64-2.11.5.gz
+          sudo mv gost-linux-amd64-2.11.5 /usr/local/bin/gost
           chmod +x /usr/local/bin/gost
 
       - name: 安装 Python 依赖
@@ -46,16 +40,17 @@ jobs:
           pip install --upgrade pip
           pip install seleniumbase requests
 
-      - name: 执行续期脚本
+      - name: Run Renew Script
         env:
           ACL_USERNAME: ${{ secrets.ACL_USERNAME }}
           ACL_PASSWORD: ${{ secrets.ACL_PASSWORD }}
+          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
           xvfb-run -a -s "-screen 0 1920x1080x24" python -u renew.py
 
-      - name: 上传异常现场排查图
+      - name: 上传排查截图
         if: always()
         uses: actions/upload-artifact@v4
         with:
