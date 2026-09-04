@@ -1,46 +1,63 @@
-name: ACLClouds Auto Renew
+name: ACLClouds Auto Renew (WARP Mode)
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # 每 6 小时自动巡检一次
-  workflow_dispatch:        # 支持手动立即触发
+    - cron: '0 2 */2 * *'  # 每 2 天执行一次（与 EKNodes 节奏一致）
+  workflow_dispatch:       # 支持手动触发测试
 
 jobs:
   renew:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      - name: Checkout Code
+      - name: 检出仓库代码
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: 安装 Python 运行环境
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
-      - name: Install System Dependencies
+      - name: 安装 Chrome 浏览器
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb wget
+          sudo apt-get install -y wget curl xvfb
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
 
-      - name: Install Python Dependencies
+      - name: 启动 Cloudflare WARP 客户端
+        uses: fscarmen/warp-action@v1
+        with:
+          mode: socks5
+          port: 10808
+
+      - name: 安装 gost 代理协议转换
+        run: |
+          wget -q https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20240125/gost_3.0.0-nightly.20240125_linux_amd64.tar.gz -O gost.tar.gz
+          tar -zxvf gost.tar.gz
+          sudo mv gost /usr/local/bin/
+          chmod +x /usr/local/bin/gost
+
+      - name: 安装 Python 依赖
         run: |
           pip install --upgrade pip
-          pip install seleniumbase requests ddddocr Pillow
+          pip install seleniumbase requests
 
-      - name: Install gost (Proxy)
-        run: |
-          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
-          gzip -d gost-linux-amd64-2.11.5.gz
-          chmod +x gost-linux-amd64-2.11.5
-          sudo mv gost-linux-amd64-2.11.5 /usr/local/bin/gost
-
-      - name: Run Renew Script
+      - name: 执行续期脚本
         env:
           ACL_USERNAME: ${{ secrets.ACL_USERNAME }}
           ACL_PASSWORD: ${{ secrets.ACL_PASSWORD }}
-          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
           xvfb-run -a -s "-screen 0 1920x1080x24" python -u renew.py
+
+      - name: 上传异常现场排查图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: "*.png"
