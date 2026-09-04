@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动登录与服务器续期脚本 (OCR 模糊比对最终版)
+# ACLClouds 自动续期脚本 (增强版：修复遮挡/二次确认/刷新判定)
 # ============================================================
 import os
 import re
 import html
 import time
+import random
 import subprocess
-import difflib
 import requests
 from datetime import datetime, timezone, timedelta
 from seleniumbase import Driver
@@ -16,28 +16,25 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 
-try:
-    import ddddocr
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
+PANEL_URL = "https://panel.aclclouds.com"
+LOGIN_URL = f"{PANEL_URL}/auth/login"
 
-BASE_URL = "https://aclclouds.com"
-LOGIN_URL = f"{BASE_URL}/auth/login"
-SERVER_ID = "75e19d55"
-SERVER_CONSOLE_URL = f"{BASE_URL}/server/{SERVER_ID}"
-
-LOCAL_HTTP_PORT = 18080
+LOCAL_HTTP_PORT = 18082
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
-ACL_USERNAME = os.environ.get("ACL_USERNAME", "").strip()
+
+ACL_EMAIL = os.environ.get("ACL_EMAIL", "").strip()
 ACL_PASSWORD = os.environ.get("ACL_PASSWORD", "").strip()
 SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 
 
+def human_sleep(min_s=1.0, max_s=2.0):
+    time.sleep(random.uniform(min_s, max_s))
+
+
 def tg_send(text: str, photo_path: str = None):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("⚠️ 未配置 TG_BOT_TOKEN / TG_CHAT_ID，跳过通知。")
+        print("⚠️ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过通知。")
         return
     try:
         if photo_path and os.path.exists(photo_path):
@@ -57,11 +54,9 @@ def tg_send(text: str, photo_path: str = None):
                 timeout=30,
             )
         if resp.status_code == 200:
-            print("  ✅ TG 通知发送成功")
-        else:
-            print(f"  ⚠️ TG 通知发送失败: {resp.text}")
+            print("  ✅ TG 通知发送成功", flush=True)
     except Exception as e:
-        print(f"  ⚠️ TG 通知异常: {e}")
+        print(f"  ⚠️ TG 通知发送异常: {e}", flush=True)
 
 
 def normalize_socks5_proxy(proxy_value: str) -> str:
@@ -71,64 +66,30 @@ def normalize_socks5_proxy(proxy_value: str) -> str:
             proxy_value = proxy_value[len(prefix):]
             break
     if not proxy_value or ":" not in proxy_value:
-        raise ValueError("SOCKS5_PROXY 格式错误，应为 host:port 或 user:pass@host:port。")
+        raise ValueError("SOCKS5_PROXY 格式错误。")
     return proxy_value
-
-
-def wait_http_proxy_ready(port: int, timeout: int = 15):
-    proxies = {"http": f"http://127.0.0.1:{port}", "https": f"http://127.0.0.1:{port}"}
-    last_error = None
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            resp = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=8)
-            if resp.ok:
-                print("  ✅ 本地 HTTP 代理连通性测试成功")
-                return
-        except Exception as e:
-            last_error = e
-        time.sleep(1)
-    raise RuntimeError(f"本地 HTTP 代理就绪检测失败: {last_error}")
 
 
 def start_gost(socks_proxy: str) -> subprocess.Popen:
     normalized = normalize_socks5_proxy(socks_proxy)
     cmd = ["gost", "-L", f"http://127.0.0.1:{LOCAL_HTTP_PORT}", "-F", f"socks5://{normalized}"]
-    print("  🚀 启动 gost 代理中转...")
+    print("  🚀 启动 gost 代理中转...", flush=True)
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(2)
     if proc.poll() is not None:
-        raise RuntimeError("gost 启动失败，请检查 SOCKS5_PROXY 格式和 gost 安装。")
-    wait_http_proxy_ready(LOCAL_HTTP_PORT)
-    print(f"  ✅ gost 已启动，本地代理端口：{LOCAL_HTTP_PORT}")
+        raise RuntimeError("gost 启动失败。")
+    print(f"  ✅ gost 已启动，本地代理端口：{LOCAL_HTTP_PORT}", flush=True)
     return proc
 
 
-def get_expire_info(driver) -> str:
-    expire_info = "未知"
+def human_type(driver, element, text: str):
     try:
-        body_text = driver.get_text("body").replace("\u00a0", " ").replace("\u202f", " ")
-        time_match = re.search(r'(?i)(?:Time remaining|remaining|expire)[\s:]*([0-9]+\s*[jdhm]\s*(?:[0-9]+\s*[hm])?)', body_text)
-        if time_match:
-            expire_info = f"剩余 {time_match.group(1).strip()}"
-        else:
-            time_match_simple = re.search(r'(?i)\b(\d+\s*[jd]\s*(?:\d+\s*[hm])?)\b', body_text)
-            if time_match_simple:
-                expire_info = f"剩余 {time_match_simple.group(1).strip()}"
-    except Exception as e:
-        print(f"⚠️ 提取天数异常: {e}")
-    return expire_info
-
-
-def set_input_value(driver, element, value):
-    try:
-        element.click()
-        time.sleep(0.2)
+        ActionChains(driver).move_to_element(element).pause(random.uniform(0.1, 0.2)).click().perform()
         element.send_keys(Keys.CONTROL, "a")
         element.send_keys(Keys.BACKSPACE)
-        for ch in value:
+        for ch in text:
             element.send_keys(ch)
-            time.sleep(0.02)
+            time.sleep(random.uniform(0.03, 0.08))
         driver.execute_script("""
             const el = arguments[0];
             el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -138,150 +99,82 @@ def set_input_value(driver, element, value):
         pass
 
 
-def ocr_recognize_image(image_bytes: bytes) -> str:
-    if not OCR_AVAILABLE:
-        return ""
+def dismiss_annoying_popups(driver):
+    """清理遮挡点击的弹窗（如 PWA 安装提示、提示浮层）"""
     try:
-        ocr = ddddocr.DdddOcr(show_ad=False)
-        res = ocr.classification(image_bytes)
-        return res.strip()
-    except Exception as e:
-        print(f"OCR 识别单图出错: {e}")
-        return ""
+        # 关闭形如 "Install the panel on your home screen" 等弹窗
+        close_btns = driver.find_elements(By.XPATH, "//button[translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='close' or contains(., 'Close') or contains(., 'Dismiss') or contains(., 'Cancel')]")
+        for btn in close_btns:
+            if btn.is_displayed():
+                driver.execute_script("arguments[0].click();", btn)
+                print("  🧹 成功清理屏幕遮挡弹窗", flush=True)
+                human_sleep(0.5, 1.0)
+    except Exception:
+        pass
 
 
-def solve_acl_custom_captcha(driver, context_name="登录页"):
-    print(f"  🛡️ 正在处理 [{context_name}] 的 'I am not a robot' 验证码...", flush=True)
+def extract_remaining_time(driver) -> str:
+    """提取剩余时间文本"""
+    dismiss_annoying_popups(driver)
+    try:
+        # 匹配包含 "Time remaining:" 的区块
+        elem = driver.find_element(By.XPATH, "//*[contains(text(), 'Time remaining')]/.. | //*[contains(text(), 'Time remaining')]")
+        text = elem.text.strip()
+        match = re.search(r'Time remaining:\s*([^\n\r]+)', text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        # 备选匹配直接出现的时间模式如 1d 19h
+        time_match = re.search(r'(\d+\s*d\s*\d+\s*h)', text)
+        if time_match:
+            return time_match.group(1)
+        return text.split("\n")[0]
+    except Exception:
+        return "未知"
 
-    clicked = driver.execute_script("""
-        const candidates = Array.from(document.querySelectorAll('*')).filter(el => {
-            const txt = (el.innerText || el.textContent || '').trim();
-            return txt.includes('not a robot') && el.children.length <= 4 && el.clientHeight < 120;
-        });
 
-        if (candidates.length === 0) return false;
-        
-        const container = candidates[0];
-        const clickable = container.querySelector('input, span, div, svg') || container;
-        clickable.scrollIntoView({ block: 'center' });
+def trigger_renew(driver):
+    """强力触发续期及可能伴随的模态确认框"""
+    dismiss_annoying_popups(driver)
 
-        ['mouseover', 'mouseenter', 'mousedown', 'mouseup', 'click'].forEach(evtType => {
-            clickable.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
-        });
-        return true;
-    """)
+    # 1. 定位 Renew 按钮
+    renew_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Renew')]")
+    if not renew_btns:
+        print("  ⚠️ 未在页面找到 Renew 按钮", flush=True)
+        return False
 
-    if clicked:
-        print(f"  👉 [{context_name}] 已派发物理事件点击验证码方框，等待响应...", flush=True)
-        time.sleep(3)
-    else:
+    renew_btn = renew_btns[0]
+    print("  👉 找到 Renew 按钮，准备触发点击...", flush=True)
+
+    # 尝试原生移动点击 + JS 强制点击双重保险
+    try:
+        ActionChains(driver).move_to_element(renew_btn).pause(0.3).click().perform()
+    except Exception:
+        pass
+    driver.execute_script("arguments[0].click();", renew_btn)
+    print("  ⚡ 已向 Renew 按钮派发点击事件", flush=True)
+    human_sleep(2.0, 3.0)
+
+    # 2. 检查是否有二次确认窗口 (Modal / SweetAlert / 对话框)
+    confirm_keywords = ["confirm", "yes", "确定", "renew", "continue"]
+    for kw in confirm_keywords:
         try:
-            box_elem = driver.find_element(By.XPATH, "//*[contains(text(), 'not a robot')]/..")
-            ActionChains(driver).move_to_element(box_elem).click().perform()
-            print(f"  👉 [{context_name}] XPath 点击完成", flush=True)
-            time.sleep(3)
+            modals = driver.find_elements(By.XPATH, f"//div[contains(@role, 'dialog') or contains(@class, 'modal') or contains(@class, 'swal2')]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{kw}')]")
+            for c_btn in modals:
+                if c_btn.is_displayed():
+                    print(f"  🔔 检测到二次确认框并点击: [{c_btn.text}]", flush=True)
+                    driver.execute_script("arguments[0].click();", c_btn)
+                    human_sleep(2.0, 3.0)
+                    break
         except Exception:
             pass
 
-    try:
-        prompt_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'Click on') or contains(text(), 'click on')]")
-        if prompt_elements and any(el.is_displayed() for el in prompt_elements):
-            target_element = next(el for el in prompt_elements if el.is_displayed())
-            prompt_text = target_element.text.strip()
-            print(f"  🧩 发现二次验证点选题: {prompt_text}", flush=True)
-
-            match = re.search(r'[Cc]lick on\s+([A-Za-z0-9_-]+)', prompt_text)
-            if match:
-                target_word = match.group(1).strip().lower()
-                print(f"  🎯 目标关键字为: [{target_word}]", flush=True)
-
-                candidate_cards = driver.execute_script("""
-                    const promptEl = arguments[0];
-                    let container = promptEl.nextElementSibling;
-                    if (!container) {
-                        container = promptEl.parentElement.querySelector('.grid, [class*="grid"], [class*="captcha"]');
-                    }
-                    if (!container) {
-                        let p = promptEl.parentElement;
-                        for (let i = 0; i < 3; i++) {
-                            if (p && p.querySelectorAll('img, canvas').length >= 4) {
-                                container = p;
-                                break;
-                            }
-                            if (p) p = p.parentElement;
-                        }
-                    }
-                    if (!container) return [];
-
-                    let cards = Array.from(container.querySelectorAll('canvas, img'));
-                    if (cards.length >= 4) return cards.slice(0, 4);
-
-                    let children = Array.from(container.children).filter(c => c.clientHeight > 20 && c.clientWidth > 40);
-                    if (children.length >= 4) return children.slice(0, 4);
-
-                    return [];
-                """, target_element)
-
-                if not candidate_cards or len(candidate_cards) < 4:
-                    candidate_cards = driver.find_elements(
-                        By.XPATH,
-                        "//*[contains(text(), 'Click on')]/following::canvas[position()<= 4] | //*[contains(text(), 'Click on')]/following::img[position()<= 4]"
-                    )
-
-                print(f"  🔍 成功精准锁定验证码区域内 {len(candidate_cards)} 个候选卡片，开始 OCR 识别与相似度比对...", flush=True)
-
-                best_card = None
-                best_score = 0.0
-                best_text = ""
-
-                for idx, card in enumerate(candidate_cards):
-                    card_ocr_text = ""
-                    if OCR_AVAILABLE:
-                        try:
-                            card_png = card.screenshot_as_png
-                            card_ocr_text = ocr_recognize_image(card_png).lower()
-                        except Exception as ocr_err:
-                            print(f"  ⚠️ 卡片 #{idx+1} 识别出错: {ocr_err}")
-
-                    score = difflib.SequenceMatcher(None, target_word, card_ocr_text).ratio()
-                    if target_word in card_ocr_text or (len(card_ocr_text) >= 4 and card_ocr_text in target_word):
-                        score = max(score, 0.85)
-
-                    print(f"  🔍 卡片 #{idx+1} 识别: [{card_ocr_text}] | 相似度得分: {score:.2f}", flush=True)
-
-                    if score > best_score:
-                        best_score = score
-                        best_card = card
-                        best_text = card_ocr_text
-
-                if best_card and best_score >= 0.4:
-                    print(f"  ✨ 最佳匹配卡片确认: [{best_text}] (得分: {best_score:.2f})", flush=True)
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", best_card)
-                    time.sleep(0.5)
-                    try:
-                        best_card.click()
-                    except Exception:
-                        driver.execute_script("arguments[0].click();", best_card)
-                    print(f"  ✅ 已精准点击目标卡片: {best_text}", flush=True)
-                    time.sleep(3)
-                else:
-                    print(f"  ⚠️ 最高相似度仅为 {best_score:.2f}，未找到足够匹配的卡片", flush=True)
-    except Exception as e:
-        print(f"  ℹ️ 点选验证阶段处理结束: {e}", flush=True)
-
-    for _ in range(6):
-        body_str = driver.get_text("body")
-        if "Verified" in body_str:
-            print("  🟢 验证码已成功变为 Verified 状态！", flush=True)
-            return True
-        time.sleep(1)
-    return False
+    return True
 
 
 def main():
-    print("=== Python 任务初始化启动 ===", flush=True)
-    if not ACL_USERNAME or not ACL_PASSWORD:
-        print("❌ 未在 Secrets 中配置 ACL_USERNAME 或 ACL_PASSWORD", flush=True)
+    print("=== ACLClouds 自动续期任务启动 ===", flush=True)
+    if not ACL_EMAIL or not ACL_PASSWORD:
+        print("❌ 未配置 ACL_EMAIL 或 ACL_PASSWORD Secrets", flush=True)
         return
 
     gost_proc = None
@@ -291,138 +184,90 @@ def main():
         try:
             gost_proc = start_gost(SOCKS5_PROXY)
             uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
-            print("🔗 代理检测正常，已启用中转。")
         except Exception as e:
-            print(f"⚠️ 代理启动失败：{e}，将尝试直连。")
+            print(f"⚠️ 代理启动失败: {e}", flush=True)
 
     driver = Driver(uc=True, headless=False, proxy=uc_proxy)
 
     try:
-        # 1. 登录
-        print(f"🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
-        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
-        time.sleep(4)
+        # 1. 打开登录页面
+        print(f"🌐 访问控制面板: {LOGIN_URL} ...", flush=True)
+        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=6)
+        human_sleep(3.0, 5.0)
 
-        user_selector = "input[name='user'], input[name='username'], input[name='email'], input[type='text'], input[type='email']"
-        driver.wait_for_element_visible(user_selector, timeout=25)
-
-        user_elem = driver.find_element(By.CSS_SELECTOR, user_selector)
-        set_input_value(driver, user_elem, ACL_USERNAME)
-        print(f"  📝 已填入账号: {ACL_USERNAME[:3]}***", flush=True)
-        time.sleep(1)
-
-        pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
-        set_input_value(driver, pwd_elem, ACL_PASSWORD)
-        print("  📝 已填入密码", flush=True)
-        time.sleep(1)
-
-        solve_acl_custom_captcha(driver, context_name="登录页")
-        time.sleep(2)
-
-        print("🔑 正在点击 [Sign in] 按钮提交登录...", flush=True)
-        submit_btn = driver.find_element(By.XPATH, "//button[contains(., 'Sign in') or contains(., 'Login') or contains(., 'Connexion') or @type='submit']")
-        try:
-            submit_btn.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", submit_btn)
-
-        for _ in range(15):
-            if "/auth/login" not in driver.current_url:
-                break
-            time.sleep(1)
-
+        # 2. 登录处理
         if "/auth/login" in driver.current_url:
-            driver.save_screenshot("login_failed.png")
-            body_text = driver.get_text("body")
-            err_hint = "登录验证失败"
-            for line in body_text.split("\n"):
-                line_str = line.strip()
-                if line_str and any(k in line_str.lower() for k in ["invalid", "incorrect", "password", "captcha", "erreur", "mot de passe", "not found"]):
-                    err_hint = line_str
-                    break
-            print(f"❌ 登录未成功跳转，页面提示: {err_hint}", flush=True)
-            tg_send(
-                f"🔴 <b>ACLClouds 登录失败</b>\n\n❌ <b>提示：</b><code>{html.escape(err_hint)}</code>",
-                photo_path="login_failed.png"
-            )
-            return
+            print("  🔑 输入登录凭据...", flush=True)
+            user_input = driver.wait_for_element_visible("input[name='username'], input[type='text'], input[type='email']", timeout=20)
+            human_type(driver, user_input, ACL_EMAIL)
 
-        print(f"✅ 登录成功！当前页面: {driver.current_url}", flush=True)
+            pwd_input = driver.wait_for_element_visible("input[name='password'], input[type='password']", timeout=10)
+            human_type(driver, pwd_input, ACL_PASSWORD)
 
-        # 2. 控制台
-        print(f"🔄 打开服务器控制台: {SERVER_CONSOLE_URL} ...", flush=True)
-        driver.get(SERVER_CONSOLE_URL)
-        time.sleep(5)
+            submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'Login') or contains(., 'Log In')]")
+            driver.execute_script("arguments[0].click();", submit_btn)
+            human_sleep(4.0, 6.0)
 
-        expire_info_before = get_expire_info(driver)
-        print(f"⏳ 续期前服务器状态: {expire_info_before}", flush=True)
+        # 3. 进入服务器控制台界面
+        dismiss_annoying_popups(driver)
+        # 如果还在首页，点击第一台服务器卡片进入控制台
+        if "/server/" not in driver.current_url:
+            server_cards = driver.find_elements(By.XPATH, "//a[contains(@href, '/server/')]")
+            if server_cards:
+                print("  🖥️ 从服务器列表进入实例控制台...", flush=True)
+                driver.execute_script("arguments[0].click();", server_cards[0])
+                human_sleep(4.0, 6.0)
 
-        # 3. 寻找提示栏里的 Renew 按钮
-        renew_xpath = "//button[contains(., 'Renew') or contains(., 'Renouveler')]"
-        renew_elements = driver.find_elements(By.XPATH, renew_xpath)
-        
-        now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+        dismiss_annoying_popups(driver)
 
-        if not renew_elements:
-            print("ℹ️ 当前未到续期时间（续期开放于到期前 2 天内）", flush=True)
-            driver.save_screenshot("dashboard_status.png")
-            tg_send(
-                f"ℹ️ <b>ACLClouds 状态巡检</b>\n\n"
-                f"⏳ <b>有效时间：</b><code>{html.escape(expire_info_before)}</code>\n"
-                f"📌 <b>续期状态：</b>未到操作窗口（到期前 2 天内开放）\n"
-                f"⏰ <b>巡检时间：</b><code>{now}</code>",
-                photo_path="dashboard_status.png"
-            )
-            return
+        # 4. 读取续期前时间
+        before_time = extract_remaining_time(driver)
+        print(f"⏳ 当前剩余到期时间: {before_time}", flush=True)
 
-        print("👉 物理真实点击 Renew 按钮...", flush=True)
-        try:
-            renew_elements[0].click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", renew_elements[0])
-        time.sleep(3)
+        # 5. 执行续期点击
+        clicked = trigger_renew(driver)
 
-        # 4. 处理 Anti-bot confirmation 弹窗
-        print("🔍 检查 Anti-bot confirmation 弹窗...", flush=True)
-        solve_acl_custom_captcha(driver, context_name="Anti-bot 弹窗")
-
-        for _ in range(8):
-            dialog_open = driver.execute_script("return !!document.querySelector('div[role=\"dialog\"], .modal, .swal2-modal');")
-            if not dialog_open:
-                break
-            time.sleep(1)
-
-        # 5. 刷新页面检查最新天数
+        # 关键修正：给服务器后端充足的落库和结算时间（等待 6 秒后强制刷新）
+        print("  ⏳ 等待后端接口处理并强制刷新界面...", flush=True)
+        time.sleep(6)
         driver.refresh()
-        time.sleep(4)
+        human_sleep(4.0, 6.0)
+        dismiss_annoying_popups(driver)
 
-        expire_info_after = get_expire_info(driver)
-        driver.save_screenshot("final_page.png")
+        # 6. 读取续期后时间
+        after_time = extract_remaining_time(driver)
+        print(f"📊 刷新后剩余到期时间: {after_time}", flush=True)
+
+        # 7. 保存现场并推送 Telegram
+        driver.save_screenshot("acl_final.png")
+        now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+
+        # 判断续期结果
+        if before_time != after_time and "未知" not in after_time:
+            status_title = "🎉 <b>ACLClouds 续期成功！</b>"
+        else:
+            status_title = "📋 <b>ACLClouds 自动巡检报备</b>"
 
         tg_send(
-            f"📋 <b>ACLClouds 自动续期汇总</b>\n\n"
-            f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
-            f"⏰ <b>执行时间：</b><code>{now}</code>",
-            photo_path="final_page.png",
+            f"{status_title}\n\n"
+            f"⌛ <b>到期变动：</b>剩余 <code>{before_time}</code> ➜ 剩余 <code>{after_time}</code>\n"
+            f"⏰ <b>执行时间：</b><code>{now_time}</code>",
+            photo_path="acl_final.png"
         )
-        print(f"\n✅ 任务执行完毕，最新状态: {expire_info_after}", flush=True)
+        print("🎉 任务完成并已推送状态。", flush=True)
 
     except Exception as e:
-        err_msg = str(e)
-        print(f"❌ 执行异常: {err_msg}", flush=True)
+        err = str(e)
+        print(f"❌ 运行发生异常: {err}", flush=True)
         try:
-            driver.save_screenshot("error.png")
+            driver.save_screenshot("acl_error.png")
+            tg_send(f"🔴 <b>ACLClouds 运行异常</b>\n\n<code>{html.escape(err)}</code>", photo_path="acl_error.png")
         except Exception:
             pass
-        tg_send(
-            f"🔴 <b>ACLClouds 续期通知</b>\n\n❌ <b>脚本执行异常</b>：\n<code>{html.escape(err_msg)}</code>",
-            photo_path="error.png",
-        )
     finally:
         driver.quit()
         if gost_proc:
             gost_proc.terminate()
-            print("gost 进程已终止。")
 
 
 if __name__ == "__main__":
