@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动续期脚本 (回归 18:09 原生架构纯净稳定版)
+# ACLClouds 自动续期脚本 (代理容错 + 自动自愈回退版)
 # ============================================================
 import os
 import re
@@ -23,7 +23,6 @@ LOCAL_HTTP_PORT = 18082
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 
-# 精准读取你 Secrets 里的变量
 ACL_USERNAME = os.environ.get("ACL_USERNAME", "").strip()
 ACL_PASSWORD = os.environ.get("ACL_PASSWORD", "").strip()
 SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
@@ -157,7 +156,6 @@ def trigger_renew(driver):
     print("  ⚡ 已向 Renew 按钮派发点击事件", flush=True)
     human_sleep(2.0, 3.0)
 
-    # 如果有二次确认框则自动点掉
     for kw in ["confirm", "yes", "确定", "renew", "continue"]:
         try:
             modals = driver.find_elements(
@@ -174,6 +172,17 @@ def trigger_renew(driver):
             pass
 
     return True
+
+
+def is_page_crashed(driver):
+    """检测页面是否白屏断开"""
+    try:
+        body = driver.find_element(By.TAG_NAME, "body").text
+        if "ERR_CONNECTION" in body or "can't be reached" in body:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def main():
@@ -195,10 +204,19 @@ def main():
     driver = Driver(uc=True, headless=False, proxy=uc_proxy)
 
     try:
-        # 1. 打开面板页面
-        print(f"🌐 访问控制面板: {PANEL_URL} ...", flush=True)
-        driver.uc_open_with_reconnect(PANEL_URL, reconnect_time=8)
-        human_sleep(4.0, 6.0)
+        # 1. 打开登录地址
+        print(f"🌐 访问控制面板: {LOGIN_URL} ...", flush=True)
+        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=8)
+        human_sleep(3.0, 5.0)
+
+        # 自愈机制：如果代理通道被掐断 (ERR_CONNECTION_CLOSED)，重启为直连
+        if is_page_crashed(driver):
+            print("⚠️ 检测到代理通道被切断 (ERR_CONNECTION_CLOSED)，正在自愈切换为直连重试...", flush=True)
+            driver.quit()
+            time.sleep(2)
+            driver = Driver(uc=True, headless=False)  # 直连
+            driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=8)
+            human_sleep(4.0, 6.0)
 
         # 2. 账号密码登录
         if "/auth/login" in driver.current_url:
