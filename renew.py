@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动登录与服务器续期脚本 (弹窗等待与二次提交完整版)
+# ACLClouds 自动登录与服务器续期脚本 (弹窗复选框与提交完整版)
 # ============================================================
 import os
 import re
@@ -170,94 +170,88 @@ def ocr_recognize_image(image_bytes: bytes) -> str:
 def solve_acl_custom_captcha(driver, context_name="登录页"):
     print(f"  🛡️ 正在处理 [{context_name}] 的 'I am not a robot' 验证码...", flush=True)
 
-    clicked = driver.execute_script("""
-        const candidates = Array.from(document.querySelectorAll('*')).filter(el => {
-            const txt = (el.innerText || el.textContent || '').trim();
-            return txt.includes('not a robot') && el.children.length <= 4 && el.clientHeight < 120;
-        });
+    # 1. 优先定位弹窗或页面中的复选框元素
+    target_box = None
+    try:
+        selectors = [
+            "div[role='dialog'] input[type='checkbox']",
+            ".modal input[type='checkbox']",
+            "div[role='dialog'] span",
+            "input[type='checkbox']"
+        ]
+        for sel in selectors:
+            elems = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in elems:
+                if el.is_displayed():
+                    target_box = el
+                    break
+            if target_box:
+                break
+    except Exception:
+        pass
 
-        if (candidates.length === 0) return false;
-        
-        const container = candidates[0];
-        const clickable = container.querySelector('input, span, div, svg') || container;
-        clickable.scrollIntoView({ block: 'center' });
-
-        ['mouseover', 'mouseenter', 'mousedown', 'mouseup', 'click'].forEach(evtType => {
-            clickable.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
-        });
-        return true;
-    """)
-
-    if clicked:
-        print(f"  👉 [{context_name}] 已派发物理事件点击验证码方框，等待响应...", flush=True)
-        time.sleep(2)
-    else:
+    # 2. 真实物理点击复选框
+    clicked = False
+    if target_box:
         try:
-            box_elem = driver.find_element(By.XPATH, "//*[contains(text(), 'not a robot')]/..")
-            ActionChains(driver).move_to_element(box_elem).click().perform()
-            print(f"  👉 [{context_name}] XPath 点击完成", flush=True)
-            time.sleep(2)
+            ActionChains(driver).move_to_element(target_box).pause(0.2).click().perform()
+            clicked = True
+            print(f"  👉 [{context_name}] ActionChains 物理点击复选框成功", flush=True)
         except Exception:
             pass
 
-    # 轮询等待点选题或 Verified 状态出现（最长等待 10 秒）
+    if not clicked:
+        clicked = driver.execute_script("""
+            const modal = document.querySelector('div[role="dialog"], .modal') || document.body;
+            const candidates = Array.from(modal.querySelectorAll('*')).filter(el => {
+                const txt = (el.innerText || el.textContent || '').trim();
+                return txt.includes('not a robot') && el.children.length <= 4 && el.clientHeight < 120;
+            });
+            if (candidates.length === 0) return false;
+            const container = candidates[0];
+            const clickable = container.querySelector('input, span, div, svg') || container;
+            clickable.scrollIntoView({ block: 'center' });
+            ['mouseover', 'mouseenter', 'mousedown', 'mouseup', 'click'].forEach(evtType => {
+                clickable.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
+            });
+            return true;
+        """)
+        if clicked:
+            print(f"  👉 [{context_name}] JS 派发事件点击复选框", flush=True)
+
+    time.sleep(2)
+
+    # 3. 轮询等待点选题出现或直接 Verified（最长等待 10 秒）
     target_element = None
     for _ in range(10):
-        prompt_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'Click on') or contains(text(), 'click on')]")
-        visible_prompts = [el for el in prompt_elements if el.is_displayed()]
+        prompts = driver.find_elements(By.XPATH, "//*[contains(text(), 'Click on') or contains(text(), 'click on')]")
+        visible_prompts = [p for p in prompts if p.is_displayed()]
         if visible_prompts:
             target_element = visible_prompts[0]
             break
-        body_str = driver.get_text("body")
-        if "Verified" in body_str:
-            print(f"  🟢 [{context_name}] 无需二次点选，直接变为 Verified 状态！", flush=True)
+        body_text = driver.get_text("body")
+        if "Verified" in body_text:
+            print(f"  🟢 [{context_name}] 验证码直接变为 Verified 状态！", flush=True)
             return True
         time.sleep(1)
 
+    # 4. 如果有点选题，执行 OCR 识别与点击
     if target_element:
         try:
             prompt_text = target_element.text.strip()
-            print(f"  🧩 发现二次验证点选题: {prompt_text}", flush=True)
-
+            print(f"  🧩 [{context_name}] 发现点选题: {prompt_text}", flush=True)
             match = re.search(r'[Cc]lick on\s+([A-Za-z0-9_-]+)', prompt_text)
             if match:
                 target_word = match.group(1).strip().lower()
                 print(f"  🎯 目标关键字为: [{target_word}]", flush=True)
 
-                candidate_cards = driver.execute_script("""
-                    const promptEl = arguments[0];
-                    let container = promptEl.nextElementSibling;
-                    if (!container) {
-                        container = promptEl.parentElement.querySelector('.grid, [class*="grid"], [class*="captcha"]');
-                    }
-                    if (!container) {
-                        let p = promptEl.parentElement;
-                        for (let i = 0; i < 3; i++) {
-                            if (p && p.querySelectorAll('img, canvas').length >= 4) {
-                                container = p;
-                                break;
-                            }
-                            if (p) p = p.parentElement;
-                        }
-                    }
-                    if (!container) return [];
-
-                    let cards = Array.from(container.querySelectorAll('canvas, img'));
-                    if (cards.length >= 4) return cards.slice(0, 4);
-
-                    let children = Array.from(container.children).filter(c => c.clientHeight > 20 && c.clientWidth > 40);
-                    if (children.length >= 4) return children.slice(0, 4);
-
-                    return [];
-                """, target_element)
-
-                if not candidate_cards or len(candidate_cards) < 4:
-                    candidate_cards = driver.find_elements(
-                        By.XPATH,
-                        "//*[contains(text(), 'Click on')]/following::canvas[position()<= 4] | //*[contains(text(), 'Click on')]/following::img[position()<= 4]"
-                    )
-
-                print(f"  🔍 成功精准锁定验证码区域内 {len(candidate_cards)} 个候选卡片，开始 OCR 识别与相似度比对...", flush=True)
+                candidate_cards = driver.find_elements(
+                    By.XPATH,
+                    "//*[contains(text(), 'Click on')]/following::canvas[position()<= 4] | "
+                    "//*[contains(text(), 'Click on')]/following::img[position()<= 4] | "
+                    "//div[contains(@role, 'dialog')]//img | //div[contains(@role, 'dialog')]//canvas"
+                )
+                candidate_cards = [c for c in candidate_cards if c.is_displayed()][:4]
 
                 best_card = None
                 best_score = 0.0
@@ -277,7 +271,6 @@ def solve_acl_custom_captcha(driver, context_name="登录页"):
                         score = max(score, 0.85)
 
                     print(f"  🔍 卡片 #{idx+1} 识别: [{card_ocr_text}] | 相似度得分: {score:.2f}", flush=True)
-
                     if score > best_score:
                         best_score = score
                         best_card = card
@@ -286,22 +279,20 @@ def solve_acl_custom_captcha(driver, context_name="登录页"):
                 if best_card and best_score >= 0.4:
                     print(f"  ✨ 最佳匹配卡片确认: [{best_text}] (得分: {best_score:.2f})", flush=True)
                     driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", best_card)
-                    time.sleep(0.5)
+                    time.sleep(0.3)
                     try:
                         best_card.click()
                     except Exception:
                         driver.execute_script("arguments[0].click();", best_card)
                     print(f"  ✅ 已精准点击目标卡片: {best_text}", flush=True)
-                    time.sleep(3)
-                else:
-                    print(f"  ⚠️ 最高相似度仅为 {best_score:.2f}，未找到足够匹配的卡片", flush=True)
+                    time.sleep(2)
         except Exception as e:
-            print(f"  ℹ️ 点选验证阶段处理结束: {e}", flush=True)
+            print(f"  ℹ️ 点选题处理异常: {e}")
 
     for _ in range(8):
-        body_str = driver.get_text("body")
-        if "Verified" in body_str:
-            print(f"  🟢 [{context_name}] 验证码已成功变为 Verified 状态！", flush=True)
+        body_text = driver.get_text("body")
+        if "Verified" in body_text:
+            print(f"  🟢 [{context_name}] 验证成功，已显示 Verified！", flush=True)
             return True
         time.sleep(1)
     return False
@@ -415,31 +406,28 @@ def main():
         # 4. 处理 Anti-bot confirmation 弹窗
         print("🔍 检查 Anti-bot confirmation 弹窗...", flush=True)
         time.sleep(2)
-        
-        # 弹窗内验证
+
         solve_acl_custom_captcha(driver, context_name="Anti-bot 弹窗")
         time.sleep(2)
 
-        # 点击弹窗内的确认提交按钮 (Confirm / Renew / Submit 等)
+        # 验证通过后点击弹窗里新出现的确认/Renew/Submit按钮（排除 Cancel/Close）
         try:
-            confirm_btns = driver.find_elements(
-                By.XPATH,
-                "//div[contains(@role, 'dialog') or contains(@class, 'modal') or contains(@class, 'swal2')]//button[not(contains(translate(., 'CANCEL', 'cancel'), 'cancel')) and not(contains(translate(., 'CLOSE', 'close'), 'close'))]"
-            )
-            for c_btn in confirm_btns:
-                if c_btn.is_displayed():
-                    btn_text = c_btn.text.strip()
-                    print(f"  👉 点击弹窗提交确认按钮: [{btn_text}]", flush=True)
-                    driver.execute_script("arguments[0].click();", c_btn)
+            modal_buttons = driver.find_elements(By.XPATH, "//div[contains(@role, 'dialog')]//button")
+            for mb in modal_buttons:
+                txt = mb.text.strip().lower()
+                if mb.is_displayed() and txt and "cancel" not in txt and "close" not in txt:
+                    print(f"  👉 发现弹窗提交按钮: [{mb.text}]，正在点击...", flush=True)
+                    driver.execute_script("arguments[0].click();", mb)
                     time.sleep(3)
                     break
         except Exception as e:
-            print(f"  ℹ️ 点击弹窗确认按钮检测: {e}")
+            print(f"  ℹ️ 点击弹窗提交按钮检测: {e}")
 
-        # 等待弹窗完全关闭
+        # 等待弹窗消失
         for _ in range(8):
-            dialog_open = driver.execute_script("return !!document.querySelector('div[role=\"dialog\"], .modal, .swal2-modal');")
+            dialog_open = driver.execute_script("return !!document.querySelector('div[role=\"dialog\"], .modal');")
             if not dialog_open:
+                print("  ✅ 弹窗已确认并成功关闭！", flush=True)
                 break
             time.sleep(1)
 
