@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动续期脚本 (iframe 深度穿透 + 广告流精准点击版)
+# VOER Host 自动续期脚本 (穿透声音提示 + 广告流 3 连击闭环版)
 # ============================================================
 import os
 import re
@@ -190,8 +190,8 @@ def force_click(driver, element):
 
 
 def click_watch_ad_everywhere(driver) -> bool:
-    """全域（主页面 + 所有嵌套 iframe）穿透定位并点击 Watch ad 绿色按钮"""
-    # 1. 尝试在主页面查找
+    """全域穿透定位并点击 Watch ad 绿色按钮"""
+    # 1. 尝试主 DOM
     try:
         main_btns = driver.find_elements(
             By.XPATH,
@@ -207,7 +207,7 @@ def click_watch_ad_everywhere(driver) -> bool:
     except Exception:
         pass
 
-    # 2. 穿透遍历所有 iframe
+    # 2. 遍历所有 iframe 内部
     driver.switch_to.default_content()
     iframes = driver.find_elements(By.TAG_NAME, "iframe")
     for idx, frame in enumerate(iframes):
@@ -231,15 +231,47 @@ def click_watch_ad_everywhere(driver) -> bool:
     return False
 
 
-def wait_and_click_ad_close(driver, max_wait_sec=40):
-    """查找并点击广告右上角的 Close 按钮"""
-    print(f"  ⏳ 等待广告播放结束出现 Close (最长 {max_wait_sec} 秒)...", flush=True)
+def handle_sound_and_close_ad(driver, max_wait_sec=50) -> bool:
+    """处理声音确认弹窗并关闭播放完成的广告"""
+    print(f"  ⏳ 正在监控广告播放流程 (处理声音弹窗及 Close, 最长 {max_wait_sec} 秒)...", flush=True)
     start_time = time.time()
-    time.sleep(8)
 
     while time.time() - start_time < max_wait_sec:
+        # A. 优先检查并点击可能出现的 "Continue" (Video will play with sound)
         driver.switch_to.default_content()
-        # 1. 主页面
+        try:
+            cont_btns = driver.find_elements(
+                By.XPATH,
+                "//*[text()='Continue' or contains(text(), 'Continue') or @id='continue-button']"
+            )
+            for c in cont_btns:
+                if c.is_displayed():
+                    print("  👉 捕获到声音确认弹窗 [Continue]，点击继续播放...", flush=True)
+                    force_click(driver, c)
+                    time.sleep(1)
+        except Exception:
+            pass
+
+        # 在 iframe 中检查 Continue
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        for frame in iframes:
+            try:
+                driver.switch_to.frame(frame)
+                sub_cont = driver.find_elements(
+                    By.XPATH,
+                    "//*[text()='Continue' or contains(text(), 'Continue') or @id='continue-button']"
+                )
+                for c in sub_cont:
+                    if c.is_displayed():
+                        print("  👉 在 iframe 内部捕获到 [Continue]，点击继续播放...", flush=True)
+                        force_click(driver, c)
+                        time.sleep(1)
+                driver.switch_to.default_content()
+            except Exception:
+                driver.switch_to.default_content()
+
+        # B. 检查并点击广告右上角的 "Close" 按钮
+        driver.switch_to.default_content()
         try:
             close_btns = driver.find_elements(
                 By.XPATH,
@@ -250,11 +282,12 @@ def wait_and_click_ad_close(driver, max_wait_sec=40):
                     print("  👉 在主 DOM 发现 Close 按钮，执行点击...", flush=True)
                     force_click(driver, btn)
                     time.sleep(2)
+                    driver.switch_to.default_content()
                     return True
         except Exception:
             pass
 
-        # 2. iframe 内部
+        # iframe 内部检查 Close
         iframes = driver.find_elements(By.TAG_NAME, "iframe")
         for frame in iframes:
             try:
@@ -300,6 +333,7 @@ def main():
         "--disable-heavy-ad-intervention",
         "--disable-features=HeavyAdIntervention,HeavyAdInterventionWarning",
         "--autoplay-policy=no-user-gesture-required",
+        "--mute-audio",
         "--window-size=1920,1080"
     ]
     driver = Driver(uc=True, headless=False, proxy=uc_proxy, chromium_arg=" ".join(chromium_args))
@@ -365,7 +399,7 @@ def main():
             print(f"\n🎬 === 正在准备第 {current_ad}/3 个广告 ===", flush=True)
 
             clicked = False
-            # 持续轮询，穿透所有 iframe 寻找并点击
+            # 持续轮询，穿透所有 iframe 寻找并点击 Watch ad
             for sec in range(35):
                 if click_watch_ad_everywhere(driver):
                     print(f"  🎯 第 {sec + 1} 秒成功捕获并点击第 {current_ad} 轮的 [Watch ad] 按钮！", flush=True)
@@ -381,8 +415,8 @@ def main():
                 break
 
             time.sleep(3)
-            # 等待广告播放完毕并点击 Close
-            wait_and_click_ad_close(driver, max_wait_sec=40)
+            # 处理声音提示并等待 Close 按钮
+            handle_sound_and_close_ad(driver, max_wait_sec=50)
             completed += 1
             print(f"  ✅ 第 {current_ad} 个广告观看完成！", flush=True)
             time.sleep(4)
@@ -395,7 +429,7 @@ def main():
                 f"⚠️ <b>VOER Host 看广告流程中断</b>\n\n"
                 f"🎬 <b>已完成：</b><code>{completed}/3</code> 轮\n"
                 f"⏳ <b>当前时长：</b><code>{html.escape(expire_info_before)}</code>\n"
-                f"📌 <b>原因：</b>广告按钮点击超时，附带中断时现场截图\n"
+                f"📌 <b>原因：</b>广告流程超时，附带中断现场截图\n"
                 f"⏰ <b>时间：</b><code>{now}</code>",
                 photo_path=stuck_screenshot
             )
