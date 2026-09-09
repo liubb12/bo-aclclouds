@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动登录与看广告续期脚本 (表单事件穿透 + 回车提交版)
+# VOER Host 自动登录与看广告续期脚本 (时序加固与物理交互版)
 # ============================================================
 import os
 import re
@@ -13,6 +13,7 @@ from datetime import datetime, timezone, timedelta
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 
 BASE_URL = "https://voer.host"
 LOGIN_URL = f"{BASE_URL}/login"
@@ -135,31 +136,17 @@ def get_expire_info(driver) -> str:
     return expire_info
 
 
-def robust_input(driver, element, value: str):
-    """强力注入输入并触发所有前端状态事件"""
-    try:
-        element.click()
-        time.sleep(0.2)
-        element.send_keys(Keys.CONTROL, "a")
-        element.send_keys(Keys.BACKSPACE)
-        element.send_keys(value)
-        # 通过原生 setter 赋值以防 React 状态未更新
-        driver.execute_script("""
-            const el = arguments[0];
-            const val = arguments[1];
-            const proto = Object.getPrototypeOf(el);
-            const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-            if (desc && desc.set) {
-                desc.set.call(el, val);
-            } else {
-                el.value = val;
-            }
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            el.dispatchEvent(new Event('blur', { bubbles: true }));
-        """, element, value)
-    except Exception as e:
-        print(f"⚠️ 输入异常: {e}")
+def physical_type(driver, element, value: str):
+    """纯物理方式聚焦、清空并输入"""
+    ActionChains(driver).move_to_element(element).click().pause(0.2).perform()
+    element.send_keys(Keys.CONTROL, "a")
+    time.sleep(0.1)
+    element.send_keys(Keys.BACKSPACE)
+    time.sleep(0.1)
+    for ch in value:
+        element.send_keys(ch)
+        time.sleep(0.03)
+    time.sleep(0.2)
 
 
 def solve_cf_turnstile(driver):
@@ -183,10 +170,10 @@ def solve_cf_turnstile(driver):
         except Exception:
             driver.switch_to.default_content()
 
-    for _ in range(12):
+    for _ in range(15):
         has_token = driver.execute_script("""
             const input = document.querySelector('input[name="cf-turnstile-response"]');
-            return input && input.value.length > 10;
+            return input && input.value && input.value.length > 10;
         """)
         if has_token:
             print("  🟢 Cloudflare Turnstile 验证通过，已成功生成 Response Token！", flush=True)
@@ -281,37 +268,39 @@ def main():
         time.sleep(5)
         dismiss_pwa_popups(driver)
 
-        # 2. 优先完成 Cloudflare Turnstile 人机验证
-        solve_cf_turnstile(driver)
-        time.sleep(1)
-
-        # 3. 填入账号与密码
+        # 2. 先输入账号和密码，保证表单处于完整填写状态
         user_selector = "input[type='email'], input[name='email'], input[name='username'], input[type='text']"
         driver.wait_for_element_visible(user_selector, timeout=25)
 
         user_elem = driver.find_element(By.CSS_SELECTOR, user_selector)
-        robust_input(driver, user_elem, VOER_USERNAME)
+        physical_type(driver, user_elem, VOER_USERNAME)
         print(f"  📝 已填入账号: {VOER_USERNAME[:3]}***", flush=True)
-        time.sleep(1)
 
         pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
-        robust_input(driver, pwd_elem, VOER_PASSWORD)
+        physical_type(driver, pwd_elem, VOER_PASSWORD)
         print("  📝 已填入密码", flush=True)
-        time.sleep(1.5)
 
-        # 4. 提交登录：优先在密码框直接回车，若未跳转再点 Sign in 按钮
-        print("🔑 正在提交登录 (密码框发送回车)...", flush=True)
-        pwd_elem.send_keys(Keys.ENTER)
-        time.sleep(3)
+        # 点击空白区域触发失焦事件
+        try:
+            heading = driver.find_element(By.XPATH, "//h1 | //h2 | //div[contains(., 'Sign in to your account')]")
+            heading.click()
+        except Exception:
+            pass
+        time.sleep(1)
 
-        if "/login" in driver.current_url.lower():
-            print("  ℹ️ 回车后仍在登录页，尝试点击 [Sign in] 按钮提交...", flush=True)
-            submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'Sign in') or contains(., 'Login')]")
-            try:
-                submit_btn.click()
-            except Exception:
-                driver.execute_script("arguments[0].click();", submit_btn)
+        # 3. 此时表单已就绪，触发并等待 Turnstile 验证生成 Token
+        solve_cf_turnstile(driver)
+        time.sleep(2)
 
+        # 4. 物理点击提交按钮
+        print("🔑 正在物理点击 [Sign in] 按钮提交登录...", flush=True)
+        submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'Sign in') or contains(., 'Login')]")
+        try:
+            ActionChains(driver).move_to_element(submit_btn).pause(0.2).click().perform()
+        except Exception:
+            driver.execute_script("arguments[0].click();", submit_btn)
+
+        # 等待页面跳转离开 /login
         for _ in range(15):
             if "/login" not in driver.current_url.lower():
                 break
