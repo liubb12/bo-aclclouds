@@ -2,7 +2,7 @@ name: VOER Host Auto Renew
 
 on:
   schedule:
-    - cron: '1 18 9 9 *'
+    - cron: '0 */4 * * *'
   workflow_dispatch:
 
 jobs:
@@ -38,9 +38,23 @@ jobs:
           VOER_COOKIES: ${{ secrets.VOER_COOKIES }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
         run: |
           touch output.log
+          if [ -n "$SOCKS5_PROXY" ]; then
+            echo "🚀 启动 gost 本地代理转发 (127.0.0.1:10808)..."
+            ./gost -L=http://:10808 -F="socks5://$SOCKS5_PROXY" > /dev/null 2>&1 &
+            sleep 2
+          fi
           xvfb-run -a -s "-screen 0 1920x1080x24" python -u renew_voer.py 2>&1 | tee -a output.log
+
+      - name: 上传排查截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: debug_dashboard.png
+          if-no-files-found: ignore
 
       - name: 更新 Cron
         if: always()
