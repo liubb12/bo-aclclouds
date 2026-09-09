@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动续期脚本 (穿透声音提示 + 广告流 3 连击闭环版)
+# VOER Host 自动续期脚本 (多层嵌套 iframe 递归穿透 + 声音弹窗破解版)
 # ============================================================
 import os
 import re
@@ -189,129 +189,99 @@ def force_click(driver, element):
                 driver.execute_script("arguments[0].click();", element)
 
 
-def click_watch_ad_everywhere(driver) -> bool:
-    """全域穿透定位并点击 Watch ad 绿色按钮"""
-    # 1. 尝试主 DOM
-    try:
-        main_btns = driver.find_elements(
-            By.XPATH,
-            "//button[normalize-space(.)='Watch ad' or contains(., 'Watch ad')] | "
-            "//div[contains(., 'Rewarded ad')]//button[contains(., 'Watch')]"
-        )
-        for b in main_btns:
-            txt = b.text.strip().lower()
-            if b.is_displayed() and "watch ads" not in txt and ("watch ad" in txt or "watch" in txt):
-                print("  👉 在主 DOM 捕获到 [Watch ad]，执行点击...", flush=True)
-                force_click(driver, b)
-                return True
-    except Exception:
-        pass
-
-    # 2. 遍历所有 iframe 内部
-    driver.switch_to.default_content()
-    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-    for idx, frame in enumerate(iframes):
+def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bool:
+    """递归深入所有嵌套 iframe 查找并点击匹配的元素"""
+    # 1. 检查当前 context 内部
+    for xpath in xpaths:
         try:
-            driver.switch_to.frame(frame)
-            sub_btns = driver.find_elements(
-                By.XPATH,
-                "//button[normalize-space(.)='Watch ad' or contains(., 'Watch ad') or contains(translate(., 'AD', 'ad'), 'watch ad')]"
-            )
-            for b in sub_btns:
-                txt = b.text.strip().lower()
-                if b.is_displayed() and "watch ads" not in txt:
-                    print(f"  👉 在第 {idx + 1} 个 iframe 内部捕获到 [Watch ad]，执行点击...", flush=True)
-                    force_click(driver, b)
-                    driver.switch_to.default_content()
+            elems = driver.find_elements(By.XPATH, xpath)
+            for el in elems:
+                if el.is_displayed():
+                    print(f"  👉 在深度 {current_depth} 捕获目标: {xpath}，执行点击...", flush=True)
+                    force_click(driver, el)
                     return True
-            driver.switch_to.default_content()
         except Exception:
-            driver.switch_to.default_content()
+            pass
+
+    if current_depth >= max_depth:
+        return False
+
+    # 2. 递归遍历子 iframe
+    try:
+        sub_frames = driver.find_elements(By.TAG_NAME, "iframe")
+    except Exception:
+        sub_frames = []
+
+    for idx in range(len(sub_frames)):
+        try:
+            # 重新获取避免 DOM 过期
+            frames = driver.find_elements(By.TAG_NAME, "iframe")
+            if idx >= len(frames):
+                break
+            driver.switch_to.frame(frames[idx])
+            found = recursive_find_and_click(driver, xpaths, current_depth + 1, max_depth)
+            driver.switch_to.parent_frame()
+            if found:
+                return True
+        except Exception:
+            try:
+                driver.switch_to.parent_frame()
+            except Exception:
+                pass
 
     return False
 
 
-def handle_sound_and_close_ad(driver, max_wait_sec=50) -> bool:
-    """处理声音确认弹窗并关闭播放完成的广告"""
-    print(f"  ⏳ 正在监控广告播放流程 (处理声音弹窗及 Close, 最长 {max_wait_sec} 秒)...", flush=True)
+def click_watch_ad_everywhere(driver) -> bool:
+    """全域穿透定位并点击 Watch ad 绿色按钮"""
+    xpaths = [
+        "//button[normalize-space(.)='Watch ad' or text()='Watch ad']",
+        "//button[contains(translate(., 'AD', 'ad'), 'watch ad')]",
+        "//div[contains(., 'Rewarded ad')]//button[contains(., 'Watch')]"
+    ]
+    driver.switch_to.default_content()
+    return recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=3)
+
+
+def handle_sound_and_close_ad(driver, max_wait_sec=55) -> bool:
+    """穿透多层 iframe 处理声音 Continue 弹窗，并等待 Close 按钮点击"""
+    print(f"  ⏳ 正在监控广告流程 (深度穿透声音弹窗及 Close, 最长 {max_wait_sec} 秒)...", flush=True)
     start_time = time.time()
 
+    continue_xpaths = [
+        "//button[normalize-space(.)='Continue' or contains(., 'Continue')]",
+        "//*[text()='Continue' or contains(text(), 'Continue')]",
+        "//div[contains(text(), 'play with sound')]/following::button[contains(., 'Continue')]",
+        "//*[@id='continue-button']"
+    ]
+
+    close_xpaths = [
+        "//*[text()='Close' or translate(text(), 'CLOSE', 'close')='close' or @aria-label='Close' or @id='dismiss-button']",
+        "//button[contains(., 'Close')]",
+        "//*[@id='close-button']"
+    ]
+
     while time.time() - start_time < max_wait_sec:
-        # A. 优先检查并点击可能出现的 "Continue" (Video will play with sound)
+        # A. 深入所有嵌套 iframe 点击 Continue
         driver.switch_to.default_content()
-        try:
-            cont_btns = driver.find_elements(
-                By.XPATH,
-                "//*[text()='Continue' or contains(text(), 'Continue') or @id='continue-button']"
-            )
-            for c in cont_btns:
-                if c.is_displayed():
-                    print("  👉 捕获到声音确认弹窗 [Continue]，点击继续播放...", flush=True)
-                    force_click(driver, c)
-                    time.sleep(1)
-        except Exception:
-            pass
+        c_clicked = recursive_find_and_click(driver, continue_xpaths, current_depth=0, max_depth=4)
+        if c_clicked:
+            print("  🎉 成功穿透并击发声音确认弹窗 [Continue]！广告正式起播...", flush=True)
+            time.sleep(2)
 
-        # 在 iframe 中检查 Continue
-        iframes = driver.find_elements(By.TAG_NAME, "iframe")
-        for frame in iframes:
-            try:
-                driver.switch_to.frame(frame)
-                sub_cont = driver.find_elements(
-                    By.XPATH,
-                    "//*[text()='Continue' or contains(text(), 'Continue') or @id='continue-button']"
-                )
-                for c in sub_cont:
-                    if c.is_displayed():
-                        print("  👉 在 iframe 内部捕获到 [Continue]，点击继续播放...", flush=True)
-                        force_click(driver, c)
-                        time.sleep(1)
-                driver.switch_to.default_content()
-            except Exception:
-                driver.switch_to.default_content()
-
-        # B. 检查并点击广告右上角的 "Close" 按钮
+        # B. 检查并点击广告的 Close 按钮
         driver.switch_to.default_content()
-        try:
-            close_btns = driver.find_elements(
-                By.XPATH,
-                "//*[text()='Close' or translate(text(), 'CLOSE', 'close')='close' or contains(text(), 'Close') or @id='dismiss-button']"
-            )
-            for btn in close_btns:
-                if btn.is_displayed():
-                    print("  👉 在主 DOM 发现 Close 按钮，执行点击...", flush=True)
-                    force_click(driver, btn)
-                    time.sleep(2)
-                    driver.switch_to.default_content()
-                    return True
-        except Exception:
-            pass
-
-        # iframe 内部检查 Close
-        iframes = driver.find_elements(By.TAG_NAME, "iframe")
-        for frame in iframes:
-            try:
-                driver.switch_to.frame(frame)
-                sub_close = driver.find_elements(
-                    By.XPATH,
-                    "//*[text()='Close' or translate(text(), 'CLOSE', 'close')='close'] | "
-                    "//div[@id='dismiss-button'] | //*[@id='close-button']"
-                )
-                for btn in sub_close:
-                    if btn.is_displayed():
-                        print("  👉 在广告 iframe 内部发现 Close 按钮，执行点击...", flush=True)
-                        force_click(driver, btn)
-                        driver.switch_to.default_content()
-                        time.sleep(2)
-                        return True
-                driver.switch_to.default_content()
-            except Exception:
-                driver.switch_to.default_content()
+        closed = recursive_find_and_click(driver, close_xpaths, current_depth=0, max_depth=4)
+        if closed:
+            print("  🎉 成功击发广告 [Close] 按钮！", flush=True)
+            driver.switch_to.default_content()
+            time.sleep(2)
+            return True
 
         time.sleep(2)
 
     driver.switch_to.default_content()
-    print("  ℹ️ 广告播放轮候完毕", flush=True)
+    print("  ℹ️ 广告展示超时轮候结束", flush=True)
     return True
 
 
@@ -333,7 +303,6 @@ def main():
         "--disable-heavy-ad-intervention",
         "--disable-features=HeavyAdIntervention,HeavyAdInterventionWarning",
         "--autoplay-policy=no-user-gesture-required",
-        "--mute-audio",
         "--window-size=1920,1080"
     ]
     driver = Driver(uc=True, headless=False, proxy=uc_proxy, chromium_arg=" ".join(chromium_args))
@@ -399,7 +368,6 @@ def main():
             print(f"\n🎬 === 正在准备第 {current_ad}/3 个广告 ===", flush=True)
 
             clicked = False
-            # 持续轮询，穿透所有 iframe 寻找并点击 Watch ad
             for sec in range(35):
                 if click_watch_ad_everywhere(driver):
                     print(f"  🎯 第 {sec + 1} 秒成功捕获并点击第 {current_ad} 轮的 [Watch ad] 按钮！", flush=True)
@@ -415,8 +383,8 @@ def main():
                 break
 
             time.sleep(3)
-            # 处理声音提示并等待 Close 按钮
-            handle_sound_and_close_ad(driver, max_wait_sec=50)
+            # 穿透处理声音 Continue 弹窗并等待 Close 按钮
+            handle_sound_and_close_ad(driver, max_wait_sec=55)
             completed += 1
             print(f"  ✅ 第 {current_ad} 个广告观看完成！", flush=True)
             time.sleep(4)
