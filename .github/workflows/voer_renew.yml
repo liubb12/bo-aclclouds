@@ -2,55 +2,75 @@ name: VOER Host Auto Renew
 
 on:
   schedule:
-    - cron: '25 */3 * * *' # 每 3 小时自动巡检续期
+    - cron: '0 */4 * * *'
   workflow_dispatch:
 
 jobs:
   renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
     steps:
-      - name: 检出仓库代码
+      - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.REPO_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
-
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb
+          python-version: '3.10'
 
       - name: Install Python Dependencies
         run: |
-          pip install --upgrade pip
-          pip install seleniumbase requests
+          python -m pip install --upgrade pip
+          pip install requests seleniumbase
           sbase install chromedriver
 
       - name: Install gost (Proxy)
         run: |
           wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
           gzip -d gost-linux-amd64-2.11.5.gz
-          sudo mv gost-linux-amd64-2.11.5 /usr/local/bin/gost
-          chmod +x /usr/local/bin/gost
+          mv gost-linux-amd64-2.11.5 gost
+          chmod +x gost
 
       - name: Run Renew Script
         env:
           VOER_COOKIES: ${{ secrets.VOER_COOKIES }}
-          VOER_USERNAME: ${{ secrets.VOER_USERNAME }}
-          VOER_PASSWORD: ${{ secrets.VOER_PASSWORD }}
-          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          xvfb-run -a -s "-screen 0 1920x1080x24" python -u renew_voer.py
+          touch output.log
+          xvfb-run -a -s "-screen 0 1920x1080x24" python -u renew_voer.py 2>&1 | tee -a output.log
 
-      - name: 上传排查截图
+      - name: 更新 Cron
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: voer-screenshots
-          path: "*.png"
+        env:
+          GITHUB_TOKEN: ${{ secrets.REPO_TOKEN }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+        run: |
+          NEXT_RUN_UTC=$(grep -oP 'NEXT_RUN_UTC=\K.*' output.log | tail -1)
+          if [ -n "$NEXT_RUN_UTC" ]; then
+            echo "下次运行时间 (UTC): $NEXT_RUN_UTC"
+            CRON=$(date -u -d "$NEXT_RUN_UTC" +"%-M %-H %-d %-m *")
+            echo "新 cron: $CRON"
+
+            WORKFLOW_FILE=$(grep -lE "^name:\s*['\"]?$WORKFLOW_NAME['\"]?\s*$" .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null | head -1)
+            if [ -z "$WORKFLOW_FILE" ]; then
+              echo "❌ 未找到匹配的工作流文件，跳过 cron 更新"
+              exit 0
+            fi
+
+            echo "找到工作流文件: $WORKFLOW_FILE"
+            sed -i "0,/cron: '.*'/s//cron: '$CRON'/" "$WORKFLOW_FILE"
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "$WORKFLOW_FILE"
+            COMMIT_MSG="下次执行时间：$(date -u -d "$NEXT_RUN_UTC" '+%Y年%m月%d日 %H:%M UTC')"
+            git commit -m "$COMMIT_MSG" || echo "没有变更"
+            git pull --rebase origin main
+            git push origin main
+            echo "✅ Cron 已自动更新并成功推送！"
+          else
+            echo "未检测到 NEXT_RUN_UTC，跳过 cron 更新"
+          fi
