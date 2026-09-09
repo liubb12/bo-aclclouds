@@ -86,23 +86,39 @@ def trigger_start_if_offline(driver):
         print(f"⚠️ 唤醒检测跳过: {e}")
     return False
 
-def get_dashboard_info(driver):
-    """提取倒计时时间（秒数）和今日进度"""
+def wait_and_get_dashboard_info(driver):
+    """显式轮询等待数据加载，并提取真实倒计时与今日进度"""
     raw_time = "00:00:00"
     ext_prog = "未知"
     total_seconds = 0
-    try:
-        content = driver.page_source
-        t_match = re.search(r"\b(\d{2}):(\d{2}):(\d{2})\b", content)
-        if t_match:
-            raw_time = f"{t_match.group(1)}:{t_match.group(2)}:{t_match.group(3)}"
-            total_seconds = int(t_match.group(1)) * 3600 + int(t_match.group(2)) * 60 + int(t_match.group(3))
 
-        ext_match = re.search(r"Extensions today\s*(\d+/\d+)", content, re.IGNORECASE)
+    print("⏳ 等待控制台数据动态渲染...")
+    # 最多轮询等待 20 秒，直到出现真实的倒计时或进度标识
+    for _ in range(20):
+        content = driver.page_source
+
+        # 匹配倒计时（过滤 00:00:00，优先捕获有效运行时间）
+        matches = re.findall(r"\b(\d{2}):(\d{2}):(\d{2})\b", content)
+        valid_match = None
+        for m in matches:
+            sec = int(m[0]) * 3600 + int(m[1]) * 60 + int(m[2])
+            if sec > 0:
+                valid_match = m
+                total_seconds = sec
+                raw_time = f"{m[0]}:{m[1]}:{m[2]}"
+                break
+
+        # 匹配 Extensions today 1/4 等字样
+        ext_match = re.search(r"Extensions\s*today[^\d]*(\d+\s*/\s*\d+)", content, re.IGNORECASE)
         if ext_match:
-            ext_prog = ext_match.group(1)
-    except Exception:
-        pass
+            ext_prog = ext_match.group(1).replace(" ", "")
+
+        # 只要读到了有效倒计时或进度条即可认定页面渲染就绪
+        if valid_match or ext_prog != "未知":
+            print("✨ 控制台数据动态渲染完成！")
+            break
+        time.sleep(1)
+
     return total_seconds, raw_time, ext_prog
 
 def handle_ad_and_claim(driver):
@@ -165,9 +181,14 @@ def write_next_run(seconds_remaining: int, ext_prog: str):
         tomorrow_utc = (now_utc + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
         next_run = tomorrow_utc
     else:
-        # 提前 20 分钟唤醒；最小休眠 15 分钟，最大休眠 3.5 小时
-        target_delay = max(seconds_remaining - 1200, 900)
-        target_delay = min(target_delay, 12600)
+        # 如果读取到有效时间，提前 20 分钟唤醒；否则按 3 小时兜底
+        if seconds_remaining > 1200:
+            target_delay = seconds_remaining - 1200
+        else:
+            target_delay = 10800  # 兜底 3 小时 (10800秒)
+            
+        target_delay = max(target_delay, 900)   # 最少 15 分钟
+        target_delay = min(target_delay, 12600) # 最多 3.5 小时
         next_run = now_utc + timedelta(seconds=target_delay)
 
     next_run_str = next_run.strftime("%Y-%m-%d %H:%M:%S")
@@ -180,6 +201,7 @@ def main():
     print("=== Python 任务初始化启动 ===")
     driver = Driver(browser="chrome", headless=True)
     rem_sec = 0
+    raw_time = "00:00:00"
     ext_prog = "未知"
 
     try:
@@ -187,7 +209,6 @@ def main():
 
         print(f"🌐 打开控制台: {SERVER_URL} ...")
         driver.get(SERVER_URL)
-        time.sleep(4)
 
         if "/login" in driver.current_url:
             print("❌ 会话失效，请更新 VOER_COOKIES")
@@ -197,10 +218,12 @@ def main():
         print("✅ 控制台访问成功！")
         trigger_start_if_offline(driver)
 
-        rem_sec, raw_time, ext_prog = get_dashboard_info(driver)
+        # 显式轮询等待数据渲染完毕
+        rem_sec, raw_time, ext_prog = wait_and_get_dashboard_info(driver)
         print(f"⏱️ 剩余时长: {raw_time} ({rem_sec}秒) | 进度: {ext_prog}")
 
-        extend_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Extend')]")
+        # 检索 Extend 按钮
+        extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend')]")
         target_extend = None
         for b in extend_btns:
             if b.is_displayed() and b.is_enabled():
@@ -214,7 +237,7 @@ def main():
             time.sleep(3)
             trigger_start_if_offline(driver)
 
-            rem_sec, raw_time, ext_prog = get_dashboard_info(driver)
+            rem_sec, raw_time, ext_prog = wait_and_get_dashboard_info(driver)
             msg = f"🎉 *VOER Host 续期成功*\n\n⏱️ 剩余时间：`{raw_time}`\n📊 额度进度：`{ext_prog}`"
             print(msg)
             send_telegram(msg)
