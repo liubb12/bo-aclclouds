@@ -11,9 +11,10 @@ from selenium.webdriver.common.by import By
 VOER_COOKIES = os.environ.get("VOER_COOKIES", "").strip()
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
+# 正确的机器完整地址
 SERVER_URL = os.environ.get(
     "VOER_SERVER_URL",
-    "https://voer.host/panel/server/84a3ea1a-c2b4-4798-ba20-a6b834ad7992"
+    "https://voer.host/panel/server/84a3ea1a-c2b4-4798-ba20-a6b83a4d7992"
 ).strip()
 
 def send_telegram(message: str):
@@ -33,24 +34,24 @@ def send_telegram(message: str):
         print(f"⚠️ Telegram 发送异常: {e}")
 
 def restore_session(driver, cookies_str: str):
-    """精准提取并挂载包含 domain 和 path 的 Token"""
+    """精准挂载 Token 到 Cookie 与 LocalStorage"""
     print("🔑 执行会话注入恢复...")
     if not cookies_str:
         print("❌ 错误: VOER_COOKIES 为空！")
         sys.exit(1)
 
-    # 1. 精准提取纯 JWT Token 字符串
+    # 提取纯 JWT Token 字符串
     token_match = re.search(r"token=([^;\s]+)", cookies_str)
     if token_match:
         token_val = token_match.group(1).strip()
     else:
         token_val = cookies_str.split(";")[0].strip()
 
-    # 2. 先访问根域以建立 Cookie 上下文
+    # 1. 访问站点建立域环境
     driver.get("https://voer.host/")
     time.sleep(2)
 
-    # 3. 注入带 .voer.host 根域的 Cookie
+    # 2. 注入带根域的 Cookie
     try:
         driver.add_cookie({
             "name": "token",
@@ -59,14 +60,13 @@ def restore_session(driver, cookies_str: str):
             "path": "/"
         })
         print("📦 Cookie [token] (domain: .voer.host, path: /) 注入成功！")
-    except Exception as e:
-        print(f"⚠️ 指定 domain 失败，回退默认注入: {e}")
+    except Exception:
         try:
             driver.add_cookie({"name": "token", "value": token_val, "path": "/"})
         except Exception:
             pass
 
-    # 4. 同步注入 LocalStorage 与 SessionStorage（SPA 前端框架关键鉴权点）
+    # 3. 注入本地存储
     try:
         driver.execute_script(f"""
             localStorage.setItem('token', '{token_val}');
@@ -76,6 +76,19 @@ def restore_session(driver, cookies_str: str):
         print("💾 本地存储 (LocalStorage/SessionStorage) 同步挂载就绪！")
     except Exception as e:
         print(f"⚠️ 本地存储注入异常: {e}")
+
+def dismiss_cookie_banner(driver):
+    """自动关闭右下角的 Cookie 授权弹窗"""
+    try:
+        accept_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Accept')]")
+        for btn in accept_btns:
+            if btn.is_displayed():
+                btn.click()
+                print("🍪 已自动接受并关闭 Cookie 授权弹窗。")
+                time.sleep(1)
+                break
+    except Exception:
+        pass
 
 def trigger_start_if_offline(driver):
     """检测关机状态并点击 Start 唤醒"""
@@ -91,7 +104,7 @@ def trigger_start_if_offline(driver):
                 break
 
         if is_offline or target_btn:
-            print("🚨 检测到服务器离线或关机状态！")
+            print("🚨 检测到服务器处于离线/关机状态！")
             if target_btn:
                 target_btn.click()
                 print("✅ 已点击 Start 启动开机！")
@@ -105,7 +118,7 @@ def trigger_start_if_offline(driver):
     return False
 
 def wait_and_get_dashboard_info(driver):
-    """通过整页文本捕获倒计时与进度，并保存排查截图"""
+    """通过整页文本捕获倒计时与进度"""
     raw_time = "00:00:00"
     ext_prog = "未知"
     total_seconds = 0
@@ -115,7 +128,7 @@ def wait_and_get_dashboard_info(driver):
         try:
             body_text = driver.find_element(By.TAG_NAME, "body").text
 
-            # 匹配 03:25:02 这类格式
+            # 匹配 03:25:02 这类时间
             matches = re.findall(r"\b(\d{2}):(\d{2}):(\d{2})\b", body_text)
             for m in matches:
                 sec = int(m[0]) * 3600 + int(m[1]) * 60 + int(m[2])
@@ -230,16 +243,16 @@ def main():
     ext_prog = "未知"
 
     try:
-        # 执行增强注入
+        # 1. 注入 Token 会话
         restore_session(driver, VOER_COOKIES)
 
-        print(f"🌐 打开控制台: {SERVER_URL} ...")
+        # 2. 直达正确的服务器地址
+        print(f"🌐 打开服务器控制台: {SERVER_URL} ...")
         driver.get(SERVER_URL)
-        time.sleep(3)
+        time.sleep(4)
 
-        # 再次刷新以唤醒前端框架读取 LocalStorage/Cookie
-        driver.refresh()
-        time.sleep(3)
+        # 3. 处理可能遮挡的弹窗
+        dismiss_cookie_banner(driver)
 
         if "/login" in driver.current_url:
             print("❌ 会话失效，请更新 VOER_COOKIES")
@@ -249,9 +262,11 @@ def main():
         print("✅ 控制台访问成功！")
         trigger_start_if_offline(driver)
 
+        # 4. 获取倒计时与额度
         rem_sec, raw_time, ext_prog = wait_and_get_dashboard_info(driver)
         print(f"⏱️ 剩余时长: {raw_time} ({rem_sec}秒) | 进度: {ext_prog}")
 
+        # 5. 查找 Extend 按钮并续期
         extend_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Extend') or contains(., 'Extend')]")
         target_extend = None
         for b in extend_btns:
