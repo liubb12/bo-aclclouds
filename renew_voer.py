@@ -11,7 +11,6 @@ from selenium.webdriver.common.by import By
 VOER_COOKIES = os.environ.get("VOER_COOKIES", "").strip()
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
-SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 SERVER_URL = os.environ.get(
     "VOER_SERVER_URL",
     "https://voer.host/panel/server/84a3ea1a-c2b4-4798-ba20-a6b834ad7992"
@@ -34,12 +33,13 @@ def send_telegram(message: str):
         print(f"⚠️ Telegram 发送异常: {e}")
 
 def restore_session(driver, cookies_str: str):
-    """注入 Cookie 会话"""
+    """鲁棒注入 Cookie 会话"""
     print("🔑 执行会话注入恢复...")
     if not cookies_str:
         print("❌ 错误: VOER_COOKIES 为空！")
         sys.exit(1)
 
+    # 访问 404 或主页建立域上下文
     driver.get("https://voer.host/404")
     time.sleep(2)
 
@@ -57,8 +57,8 @@ def restore_session(driver, cookies_str: str):
                 driver.add_cookie({"name": name, "value": value})
                 injected_names.append(name)
                 count += 1
-            except Exception as e:
-                print(f"  ⚠️ Cookie [{name}] 注入跳过: {e}")
+            except Exception:
+                pass
 
     print(f"📦 Cookie 注入完成 (共 {count} 项: {', '.join(injected_names)})")
 
@@ -191,10 +191,10 @@ def write_next_run(seconds_remaining: int, ext_prog: str):
         if seconds_remaining > 1200:
             target_delay = seconds_remaining - 1200
         else:
-            target_delay = 10800
+            target_delay = 10800  # 兜底 3 小时
             
-        target_delay = max(target_delay, 900)
-        target_delay = min(target_delay, 12600)
+        target_delay = max(target_delay, 900)   # 最少 15 分钟
+        target_delay = min(target_delay, 12600) # 最多 3.5 小时
         next_run = now_utc + timedelta(seconds=target_delay)
 
     next_run_str = next_run.strftime("%Y-%m-%d %H:%M:%S")
@@ -205,21 +205,8 @@ def write_next_run(seconds_remaining: int, ext_prog: str):
 
 def main():
     print("=== Python 任务初始化启动 ===")
-    
-    # 格式化代理参数：支持原生 socks5:// 直连
-    proxy_arg = None
-    if SOCKS5_PROXY:
-        raw_proxy = SOCKS5_PROXY.strip()
-        if not raw_proxy.startswith("socks5://"):
-            proxy_arg = f"socks5://{raw_proxy}"
-        else:
-            proxy_arg = raw_proxy
-        print(f"🛡️ 启用 SOCKS5 代理直连模式: {proxy_arg.split('@')[-1]}")
-        driver = Driver(browser="chrome", headless=True, proxy=proxy_arg)
-    else:
-        print("🌐 未配置 SOCKS5 代理，使用直连模式")
-        driver = Driver(browser="chrome", headless=True)
-
+    # 采用直连启动
+    driver = Driver(browser="chrome", headless=True)
     driver.set_window_size(1920, 1080)
 
     rem_sec = 0
