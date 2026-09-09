@@ -6,12 +6,12 @@ from datetime import datetime, timedelta, timezone
 import requests
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 
 # ==================== 环境变量配置 ====================
 VOER_COOKIES = os.environ.get("VOER_COOKIES", "").strip()
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
-# 正确的机器完整地址
 SERVER_URL = os.environ.get(
     "VOER_SERVER_URL",
     "https://voer.host/panel/server/84a3ea1a-c2b4-4798-ba20-a6b83a4d7992"
@@ -40,18 +40,15 @@ def restore_session(driver, cookies_str: str):
         print("❌ 错误: VOER_COOKIES 为空！")
         sys.exit(1)
 
-    # 提取纯 JWT Token 字符串
     token_match = re.search(r"token=([^;\s]+)", cookies_str)
     if token_match:
         token_val = token_match.group(1).strip()
     else:
         token_val = cookies_str.split(";")[0].strip()
 
-    # 1. 访问站点建立域环境
     driver.get("https://voer.host/")
     time.sleep(2)
 
-    # 2. 注入带根域的 Cookie
     try:
         driver.add_cookie({
             "name": "token",
@@ -66,7 +63,6 @@ def restore_session(driver, cookies_str: str):
         except Exception:
             pass
 
-    # 3. 注入本地存储
     try:
         driver.execute_script(f"""
             localStorage.setItem('token', '{token_val}');
@@ -137,10 +133,10 @@ def wait_and_get_dashboard_info(driver):
                     raw_time = f"{m[0]}:{m[1]}:{m[2]}"
                     break
 
-            # 匹配 1/4 等字样
-            prog_match = re.search(r"(\d+\s*/\s*\d+)", body_text)
+            # 匹配包含换行或空格的 X/20 或 X/4 额度进度，如 '0\n/20'
+            prog_match = re.search(r"(\d+)\s*/\s*(\d+)", body_text)
             if prog_match:
-                ext_prog = prog_match.group(1).replace(" ", "")
+                ext_prog = f"{prog_match.group(1)}/{prog_match.group(2)}"
 
             if total_seconds > 0 and ext_prog != "未知":
                 print(f"✨ 成功捕获真实数据 (第 {i+1} 秒): {raw_time} | 进度: {ext_prog}")
@@ -159,39 +155,49 @@ def wait_and_get_dashboard_info(driver):
     return total_seconds, raw_time, ext_prog
 
 def handle_ad_and_claim(driver):
-    """穿透广告并关闭"""
-    print("📺 广告加载中，等待 35 秒倒计时...")
+    """广告等待并穿透关闭"""
+    print("📺 广告播放中，等待 35 秒让奖励生效...")
     time.sleep(35)
 
-    close_xpaths = [
-        "//button[contains(text(), 'Close')]",
+    close_selectors = [
+        "//button[contains(translate(text(), 'CLOSE', 'close'), 'close')]",
         "//button[contains(text(), '关闭')]",
+        "//button[contains(text(), 'Claim')]",
+        "//button[contains(text(), 'Done')]",
         "//*[@aria-label='Close ad']",
-        "//*[@id='close-button']",
-        "//*[contains(@class, 'close-button')]"
+        "//*[@aria-label='Close']",
+        "//*[contains(@class, 'btn-close') or contains(@class, 'close-btn') or contains(@class, 'close-button')]",
+        "//svg[contains(@class, 'close')]/..",
+        "//div[contains(@class, 'modal')]//button"
     ]
 
     closed = False
-    for xp in close_xpaths:
-        els = driver.find_elements(By.XPATH, xp)
-        for el in els:
-            if el.is_displayed():
-                el.click()
-                closed = True
-                break
-        if closed:
-            break
 
+    # 1. 顶层页面查找
+    for xp in close_selectors:
+        try:
+            els = driver.find_elements(By.XPATH, xp)
+            for el in els:
+                if el.is_displayed() and el.is_enabled():
+                    driver.execute_script("arguments[0].click();", el)
+                    closed = True
+                    break
+            if closed:
+                break
+        except Exception:
+            pass
+
+    # 2. 穿透所有 iframe 内部查找
     if not closed:
         frames = driver.find_elements(By.TAG_NAME, "iframe")
         for f in frames:
             try:
                 driver.switch_to.frame(f)
-                for xp in close_xpaths:
+                for xp in close_selectors:
                     els = driver.find_elements(By.XPATH, xp)
                     for el in els:
-                        if el.is_displayed():
-                            el.click()
+                        if el.is_displayed() and el.is_enabled():
+                            driver.execute_script("arguments[0].click();", el)
                             closed = True
                             break
                     if closed:
@@ -202,22 +208,33 @@ def handle_ad_and_claim(driver):
             except Exception:
                 driver.switch_to.default_content()
 
-    if closed:
-        print("🎯 广告已成功关闭！")
+    # 3. 兜底策略：发送 ESC 键触发弹窗关闭
+    if not closed:
+        try:
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+            print("⌨️ 发送 ESC 兜底关闭弹窗")
+        except Exception:
+            pass
     else:
-        print("⚠️ 未找到关闭按钮，跳过。")
+        print("🎯 广告弹窗已成功关闭！")
+
     time.sleep(3)
 
 def write_next_run(seconds_remaining: int, ext_prog: str):
     """计算下次执行时间并写入 output.log"""
     now_utc = datetime.now(timezone.utc)
-    is_exhausted = "4/4" in ext_prog
+    is_exhausted = False
+    if "/" in ext_prog:
+        cur, total = ext_prog.split("/", 1)
+        if cur.strip() == total.strip() and cur.strip() != "0":
+            is_exhausted = True
     
     if is_exhausted:
-        print("ℹ️ 今日 4/4 额度已用尽，推算明日 UTC 00:05 重新进场...")
+        print("ℹ️ 今日额度已用尽，推算明日 UTC 00:05 重新进场...")
         tomorrow_utc = (now_utc + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
         next_run = tomorrow_utc
     else:
+        # 距离到期前 20 分钟唤醒
         if seconds_remaining > 1200:
             target_delay = seconds_remaining - 1200
         else:
@@ -243,15 +260,12 @@ def main():
     ext_prog = "未知"
 
     try:
-        # 1. 注入 Token 会话
         restore_session(driver, VOER_COOKIES)
 
-        # 2. 直达正确的服务器地址
         print(f"🌐 打开服务器控制台: {SERVER_URL} ...")
         driver.get(SERVER_URL)
         time.sleep(4)
 
-        # 3. 处理可能遮挡的弹窗
         dismiss_cookie_banner(driver)
 
         if "/login" in driver.current_url:
@@ -262,11 +276,9 @@ def main():
         print("✅ 控制台访问成功！")
         trigger_start_if_offline(driver)
 
-        # 4. 获取倒计时与额度
         rem_sec, raw_time, ext_prog = wait_and_get_dashboard_info(driver)
         print(f"⏱️ 剩余时长: {raw_time} ({rem_sec}秒) | 进度: {ext_prog}")
 
-        # 5. 查找 Extend 按钮并续期
         extend_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Extend') or contains(., 'Extend')]")
         target_extend = None
         for b in extend_btns:
@@ -282,7 +294,7 @@ def main():
             trigger_start_if_offline(driver)
 
             rem_sec, raw_time, ext_prog = wait_and_get_dashboard_info(driver)
-            msg = f"🎉 *VOER Host 续期成功*\n\n⏱️ 当前剩余时间：`{raw_time}`\n📊 额度进度：`{ext_prog}`"
+            msg = f"🎉 *VOER Host 续期完成*\n\n⏱️ 当前剩余时间：`{raw_time}`\n📊 额度进度：`{ext_prog}`"
             print(msg)
             send_telegram(msg)
         else:
