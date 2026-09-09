@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动续期脚本 (右上角 Close 坐标打击 + 满载续期终极版)
+# VOER Host 自动续期与唤醒脚本 (统一广告加时激活闭环版)
 # ============================================================
 import os
 import re
@@ -122,6 +122,9 @@ def restore_session_data(driver, credential_str: str, domain=".voer.host"):
     except Exception:
         pass
 
+    token_match = re.search(r"token=([^;\s]+)", cookie_str)
+    token_val = token_match.group(1).strip() if token_match else cookie_str.strip()
+
     if cookie_str:
         parts = [c.strip() for c in cookie_str.split(";") if c.strip()]
         for part in parts:
@@ -141,28 +144,59 @@ def restore_session_data(driver, credential_str: str, domain=".voer.host"):
                         pass
         print("  🍪 Cookie 注入完成", flush=True)
 
-    if storage_dict and isinstance(storage_dict, dict):
-        for k, v in storage_dict.items():
-            driver.execute_script("window.localStorage.setItem(arguments[0], arguments[1]);", k, str(v))
-        print("  💾 LocalStorage 恢复完成", flush=True)
-
-
-def get_expire_info(driver) -> str:
-    dismiss_pwa_popups(driver)
     try:
+        driver.execute_script(f"""
+            localStorage.setItem('token', '{token_val}');
+            localStorage.setItem('auth_token', '{token_val}');
+            sessionStorage.setItem('token', '{token_val}');
+        """)
+        if storage_dict and isinstance(storage_dict, dict):
+            for k, v in storage_dict.items():
+                driver.execute_script("window.localStorage.setItem(arguments[0], arguments[1]);", k, str(v))
+        print("  💾 LocalStorage 恢复完成", flush=True)
+    except Exception as e:
+        print(f"  ⚠️ LocalStorage 注入异常: {e}")
+
+
+def get_expire_and_progress(driver) -> tuple:
+    """精准获取倒计时和今日额度进度"""
+    dismiss_pwa_popups(driver)
+    raw_str = "未知"
+    total_seconds = 0
+    prog_str = "未知"
+
+    try:
+        body_text = driver.get_text("body").replace("\u00a0", " ").replace("\u202f", " ")
+
         elems = driver.find_elements(By.XPATH, "//*[contains(text(), ':') and string-length(text()) <= 12]")
         for elem in elems:
             txt = elem.text.strip()
-            if re.match(r'^\d{1,2}:\d{2}:\d{2}$', txt):
-                return f"剩余 {txt}"
+            m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})$', txt)
+            if m:
+                total_seconds = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+                raw_str = f"剩余 {txt}"
+                break
 
-        body_text = driver.get_text("body").replace("\u00a0", " ").replace("\u202f", " ")
-        time_match = re.search(r'(?i)(?:Time Remaining|remaining|expire)[\s:]*([0-9]+:[0-9]+:[0-9]+)', body_text)
-        if time_match:
-            return f"剩余 {time_match.group(1).strip()}"
+        if raw_str == "未知":
+            time_match = re.search(r'(?i)(?:Time Remaining|remaining|expire)[\s:]*([0-9]+:[0-9]+:[0-9]+)', body_text)
+            if time_match:
+                t = time_match.group(1).strip()
+                p = t.split(":")
+                total_seconds = int(p[0]) * 3600 + int(p[1]) * 60 + int(p[2])
+                raw_str = f"剩余 {t}"
+
+        pm = re.search(r"Extensions\s*today[^\d]*(\d+\s*/\s*\d+)", body_text, re.IGNORECASE)
+        if pm:
+            prog_str = pm.group(1).replace(" ", "")
+        else:
+            all_p = re.findall(r"(\d+\s*/\s*[1-9]\b)", body_text)
+            if all_p:
+                prog_str = all_p[0].replace(" ", "")
+
     except Exception as e:
-        print(f"⚠️ 提取时间异常: {e}")
-    return "未知"
+        print(f"⚠️ 提取状态异常: {e}")
+
+    return raw_str, total_seconds, prog_str
 
 
 def physical_click_trusted(driver, element):
@@ -253,7 +287,7 @@ def ensure_inside_ads_modal(driver):
     if not modal_containers:
         extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend')]")
         if extend_btns and extend_btns[0].is_displayed():
-            print("  ℹ️ 页面回退到主面板，重新物理点击 [+ Extend]...", flush=True)
+            print("  ℹ️ 页面检测到 [+ Extend]，物理点击触发续期/激活...", flush=True)
             physical_click_trusted(driver, extend_btns[0])
             time.sleep(2)
             c_btns = driver.find_elements(By.XPATH, watch_ads_xpath)
@@ -325,19 +359,16 @@ def handle_sound_and_close_ad(driver, max_wait_sec=65) -> bool:
     while time.time() - start_time < max_wait_sec:
         elapsed = time.time() - start_time
 
-        # 1. 声音提示优先处理
         if not has_sound_continued and elapsed < 15:
             driver.switch_to.default_content()
             if recursive_find_and_click(driver, continue_xpaths, current_depth=0, max_depth=4):
                 print("  🎉 物理击发声音遮罩 [Continue] 成功！", flush=True)
                 has_sound_continued = True
 
-        # 2. 核心防踩坑：必须播放满 30 秒才允许点击 Close，防止误触导致奖励失效
         if elapsed < 30:
             time.sleep(2)
             continue
 
-        # 3. 广告播满 30 秒后，高频查找 Close
         driver.switch_to.default_content()
         if recursive_find_and_click(driver, close_xpaths, current_depth=0, max_depth=4):
             print("  🎯 成功命中并关闭广告 [Close]！激励结算已触发！", flush=True)
@@ -345,7 +376,6 @@ def handle_sound_and_close_ad(driver, max_wait_sec=65) -> bool:
             time.sleep(3)
             return True
 
-        # 4. 若未通过 DOM 命中，执行坐标兜底打击
         if elapsed > 40:
             if click_close_by_coordinates(driver):
                 time.sleep(2)
@@ -359,23 +389,29 @@ def handle_sound_and_close_ad(driver, max_wait_sec=65) -> bool:
     return False
 
 
-def save_next_cron_run(expire_str: str):
-    """根据最新剩余时间，写入 output.log 以供 Actions 自动更新 Cron"""
+def save_next_cron_run(seconds_remaining: int, ext_prog: str):
+    """计算下次唤醒时间并写入 output.log"""
     now_utc = datetime.now(timezone.utc)
-    seconds = 0
-    m = re.search(r'(\d+):(\d+):(\d+)', expire_str)
-    if m:
-        seconds = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+    is_exhausted = False
 
-    if seconds > 1200:
-        delay = seconds - 1200
+    if "/" in ext_prog:
+        cur, total = ext_prog.split("/", 1)
+        if cur.strip() == total.strip() and cur.strip() != "0":
+            is_exhausted = True
+
+    if is_exhausted:
+        print("ℹ️ 今日 4 次额度已全部用尽，定于明日 UTC 00:05 重新进场开机续期...", flush=True)
+        next_run = (now_utc + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
     else:
-        delay = 10800
+        if seconds_remaining > 1200:
+            delay = seconds_remaining - 1200
+        else:
+            delay = 10800
 
-    delay = max(900, min(12600, delay))
-    next_run = now_utc + timedelta(seconds=delay)
+        delay = max(900, min(12600, delay))
+        next_run = now_utc + timedelta(seconds=delay)
+
     next_run_str = next_run.strftime("%Y-%m-%d %H:%M:%S")
-
     print(f"📌 计算得出下次执行时间 (UTC): {next_run_str}")
     with open("output.log", "a", encoding="utf-8") as f:
         f.write(f"NEXT_RUN_UTC={next_run_str}\n")
@@ -403,10 +439,10 @@ def main():
     ]
     driver = Driver(uc=True, headless=False, proxy=uc_proxy, chromium_arg=" ".join(chromium_args))
 
-    expire_info_after = "未知"
+    final_seconds = 0
+    final_prog = "未知"
 
     try:
-        # 1. 会话恢复直登
         print("🔑 执行会话注入恢复...", flush=True)
         driver.uc_open_with_reconnect(BASE_URL, reconnect_time=5)
         time.sleep(2)
@@ -422,10 +458,10 @@ def main():
             print("❌ 会话已失效，请重新更新 VOER_COOKIES", flush=True)
             return
 
-        expire_info_before = get_expire_info(driver)
-        print(f"⏳ 续期前服务器状态: {expire_info_before}", flush=True)
+        expire_info_before, init_sec, init_prog = get_expire_and_progress(driver)
+        print(f"⏳ 初始服务器状态: {expire_info_before} | 今日进度: {init_prog}", flush=True)
 
-        # 2. 依次完成 3 个激励广告
+        # 核心：无论是运行中续期，还是关机状态下通过广告激活，统一直接执行 3 轮广告流程
         completed = 0
         for current_ad in range(1, 4):
             print(f"\n🎬 === 正在准备第 {current_ad}/3 个广告 ===", flush=True)
@@ -460,7 +496,6 @@ def main():
 
         now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
-        # 3. 模态框收尾
         driver.switch_to.default_content()
         final_close_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Close') or contains(., 'Done') or contains(., 'Finish')]")
         for b in final_close_btns:
@@ -468,7 +503,6 @@ def main():
                 physical_click_trusted(driver, b)
                 time.sleep(1)
 
-        # 4. 后端落库与刷新验证
         print("\n⏳ 3 轮广告流程完毕，等待 10 秒后端落库后刷新页面...", flush=True)
         time.sleep(10)
         driver.switch_to.default_content()
@@ -476,17 +510,18 @@ def main():
         time.sleep(6)
         dismiss_pwa_popups(driver)
 
-        expire_info_after = get_expire_info(driver)
+        expire_info_after, final_seconds, final_prog = get_expire_and_progress(driver)
         driver.save_screenshot("final_success.png")
 
         tg_send(
             f"📋 <b>VOER Host 自动续期汇总</b>\n\n"
-            f"🎬 <b>观看广告：</b><code>{completed}/3</code> 轮 (满载续期)\n"
+            f"🎬 <b>观看广告：</b><code>{completed}/3</code> 轮 (满载续期/激活)\n"
             f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
+            f"📊 <b>今日进度：</b><code>{html.escape(final_prog)}</code>\n"
             f"⏰ <b>执行时间：</b><code>{now}</code>",
             photo_path="final_success.png",
         )
-        print(f"\n✅ 任务执行完毕，最新状态: {expire_info_after}", flush=True)
+        print(f"\n✅ 任务执行完毕，最新状态: {expire_info_after} | 额度: {final_prog}", flush=True)
 
     except Exception as e:
         err_msg = str(e)
@@ -505,7 +540,7 @@ def main():
         if gost_proc:
             gost_proc.terminate()
             print("gost 进程已终止。")
-        save_next_cron_run(expire_info_after)
+        save_next_cron_run(final_seconds, final_prog)
 
 
 if __name__ == "__main__":
