@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动续期脚本 (循环 Extend 触发 + 广告穿透关闭完整版)
+# VOER Host 自动续期脚本 (模态框广告流 3 连击精准匹配版)
 # ============================================================
 import os
 import re
@@ -13,10 +13,9 @@ import requests
 from datetime import datetime, timezone, timedelta
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 
 BASE_URL = "https://voer.host"
-LOGIN_URL = f"{BASE_URL}/login"
 SERVER_ID = "84a3ea1a-c2b4-4798-ba20-a6b83a4d7992"
 SERVER_CONSOLE_URL = f"{BASE_URL}/panel/server/{SERVER_ID}"
 
@@ -24,8 +23,6 @@ LOCAL_HTTP_PORT = 18080
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 VOER_COOKIES = os.environ.get("VOER_COOKIES", "").strip()
-VOER_USERNAME = os.environ.get("VOER_USERNAME", "").strip()
-VOER_PASSWORD = os.environ.get("VOER_PASSWORD", "").strip()
 SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 
 
@@ -114,7 +111,6 @@ def dismiss_pwa_popups(driver):
 
 
 def restore_session_data(driver, credential_str: str, domain=".voer.host"):
-    """智能解析并注入 Cookie 与 LocalStorage"""
     print("  📦 正在解析并恢复浏览器会话数据...", flush=True)
     cookie_str = credential_str
     storage_dict = {}
@@ -153,7 +149,6 @@ def restore_session_data(driver, credential_str: str, domain=".voer.host"):
 
 def get_expire_info(driver) -> str:
     dismiss_pwa_popups(driver)
-    expire_info = "未知"
     try:
         elems = driver.find_elements(By.XPATH, "//*[contains(text(), ':') and string-length(text()) <= 12]")
         for elem in elems:
@@ -164,43 +159,36 @@ def get_expire_info(driver) -> str:
         body_text = driver.get_text("body").replace("\u00a0", " ").replace("\u202f", " ")
         time_match = re.search(r'(?i)(?:Time Remaining|remaining|expire)[\s:]*([0-9]+:[0-9]+:[0-9]+)', body_text)
         if time_match:
-            expire_info = f"剩余 {time_match.group(1).strip()}"
-        else:
-            time_match_simple = re.search(r'\b(\d{1,2}:\d{2}:\d{2})\b', body_text)
-            if time_match_simple:
-                expire_info = f"剩余 {time_match_simple.group(1).strip()}"
+            return f"剩余 {time_match.group(1).strip()}"
     except Exception as e:
         print(f"⚠️ 提取时间异常: {e}")
-    return expire_info
+    return "未知"
 
 
 def wait_and_click_ad_close(driver, max_wait_sec=40):
-    """穿透查找并点击广告的关闭按钮"""
-    print(f"  ⏳ 等待广告播放完毕并关闭 (最长 {max_wait_sec} 秒)...", flush=True)
+    """穿透定位并点击广告右上角的 Close 按钮"""
+    print(f"  ⏳ 正在等待广告播放结束并出现 Close (最长 {max_wait_sec} 秒)...", flush=True)
     start_time = time.time()
-
-    # 广告一般至少要看 10-15 秒，先硬等 10 秒
-    time.sleep(10)
+    time.sleep(8)  # 广告基础展示时长
 
     while time.time() - start_time < max_wait_sec:
-        # 1. 检查主页面中的关闭按钮
+        # 1. 检查主界面
         try:
-            close_buttons = driver.find_elements(
+            close_btns = driver.find_elements(
                 By.XPATH,
-                "//button[translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='close' "
-                "or contains(., 'Close') or @aria-label='Close' or @title='Close'] | "
+                "//*[text()='Close' or translate(text(), 'CLOSE', 'close')='close' or contains(., 'Close')] | "
                 "//div[@id='dismiss-button' or @aria-label='Close ad']"
             )
-            for btn in close_buttons:
+            for btn in close_btns:
                 if btn.is_displayed():
-                    print("  👉 在主页面发现 Close 按钮，执行点击...", flush=True)
+                    print("  👉 在主 DOM 发现 Close 按钮，正在执行点击...", flush=True)
                     driver.execute_script("arguments[0].click();", btn)
                     time.sleep(2)
                     return True
         except Exception:
             pass
 
-        # 2. 穿透所有 iframe (Google Rewarded Ads 常用嵌套 iframe)
+        # 2. 穿透嵌套 iframe 寻找 Close
         try:
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             for frame in iframes:
@@ -208,11 +196,12 @@ def wait_and_click_ad_close(driver, max_wait_sec=40):
                     driver.switch_to.frame(frame)
                     sub_close = driver.find_elements(
                         By.XPATH,
-                        "//div[@id='dismiss-button'] | //button[contains(., 'Close') or @aria-label='Close'] | //*[@id='close-button']"
+                        "//*[text()='Close' or translate(text(), 'CLOSE', 'close')='close'] | "
+                        "//div[@id='dismiss-button'] | //*[@id='close-button']"
                     )
                     for btn in sub_close:
                         if btn.is_displayed():
-                            print("  👉 在广告 iframe 内部发现 Close 按钮，执行点击...", flush=True)
+                            print("  👉 在广告 iframe 内部发现 Close 按钮，正在点击...", flush=True)
                             driver.execute_script("arguments[0].click();", btn)
                             driver.switch_to.default_content()
                             time.sleep(2)
@@ -225,45 +214,7 @@ def wait_and_click_ad_close(driver, max_wait_sec=40):
 
         time.sleep(2)
 
-    print("  ℹ️ 本轮广告播放结束（可能已自动关闭）", flush=True)
-    return True
-
-
-def trigger_extend_and_watch(driver) -> bool:
-    """触发单次续期看广告链路"""
-    dismiss_pwa_popups(driver)
-    
-    # 1. 点击主界面上的 [+ Extend]
-    extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend')]")
-    if not extend_btns:
-        print("  ℹ️ 未发现 Extend 按钮", flush=True)
-        return False
-
-    print("  👉 点击 [+ Extend] 按钮...", flush=True)
-    try:
-        extend_btns[0].click()
-    except Exception:
-        driver.execute_script("arguments[0].click();", extend_btns[0])
-    time.sleep(2)
-
-    # 2. 点击确认弹窗里的 [Watch Ads] 或 [Watch Ad]
-    watch_btns = driver.find_elements(
-        By.XPATH,
-        "//button[contains(translate(., 'AD', 'ad'), 'watch ad') or contains(., 'Watch Ads') or contains(., 'Watch')]"
-    )
-    if watch_btns:
-        print("  👉 确认点击弹窗中的 [Watch Ads] 启动广告...", flush=True)
-        try:
-            watch_btns[0].click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", watch_btns[0])
-        time.sleep(3)
-    else:
-        print("  ℹ️ 未发现二次弹窗，广告可能已直接启动", flush=True)
-
-    # 3. 等待并关闭广告
-    wait_and_click_ad_close(driver, max_wait_sec=35)
-    time.sleep(3)
+    print("  ℹ️ 本轮广告等待结束", flush=True)
     return True
 
 
@@ -289,59 +240,93 @@ def main():
     driver = Driver(uc=True, headless=False, proxy=uc_proxy, chromium_arg=" ".join(chromium_args))
 
     try:
-        logged_in = False
+        # 1. 会话恢复直登
+        print("🔑 执行会话注入恢复...", flush=True)
+        driver.uc_open_with_reconnect(BASE_URL, reconnect_time=5)
+        time.sleep(2)
+        restore_session_data(driver, VOER_COOKIES)
+        time.sleep(1)
 
-        # 1. Cookie / 会话免密直登
-        if VOER_COOKIES:
-            print("🔑 检测到已配置 VOER_COOKIES，执行会话注入恢复...", flush=True)
-            driver.uc_open_with_reconnect(BASE_URL, reconnect_time=5)
-            time.sleep(2)
-            restore_session_data(driver, VOER_COOKIES)
-            time.sleep(1)
+        print(f"🔄 打开服务器控制台: {SERVER_CONSOLE_URL} ...", flush=True)
+        driver.get(SERVER_CONSOLE_URL)
+        time.sleep(6)
+        dismiss_pwa_popups(driver)
 
-            print(f"🔄 打开服务器控制台: {SERVER_CONSOLE_URL} ...", flush=True)
-            driver.get(SERVER_CONSOLE_URL)
-            time.sleep(6)
-            dismiss_pwa_popups(driver)
-
-            if "/login" not in driver.current_url.lower():
-                print(f"🎉 会话恢复直登成功！当前页面: {driver.current_url}", flush=True)
-                logged_in = True
-            else:
-                print("⚠️ 会话已失效，将尝试密码登录...", flush=True)
-
-        if not logged_in:
-            print("❌ 未登录成功，请检查会话凭证", flush=True)
+        if "/login" in driver.current_url.lower():
+            print("❌ 会话已失效，请重新更新 VOER_COOKIES", flush=True)
             return
 
         expire_info_before = get_expire_info(driver)
         print(f"⏳ 续期前服务器状态: {expire_info_before}", flush=True)
 
-        # 2. 连续执行 3 轮 看广告续期链路
-        target_rounds = 3
-        now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+        # 2. 点击 [+ Extend] 按钮
+        extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend')]")
+        if not extend_btns:
+            print("ℹ️ 未发现 Extend 按钮，可能今日次数已达上限", flush=True)
+            return
 
-        for i in range(1, target_rounds + 1):
-            print(f"\n🎬 === 正在执行第 {i}/{target_rounds} 轮续期广告 ===", flush=True)
-            ok = trigger_extend_and_watch(driver)
-            if not ok:
-                print(f"  ⚠️ 第 {i} 轮未找到 Extend 按钮，可能次数已达上限或未开放", flush=True)
+        print("👉 点击 [+ Extend] 按钮打开弹窗...", flush=True)
+        driver.execute_script("arguments[0].click();", extend_btns[0])
+        time.sleep(2)
+
+        # 3. 点击绿色确认按钮 [✓ Watch Ads] 进入广告模态框
+        watch_ads_btn = driver.find_elements(By.XPATH, "//button[contains(., 'Watch Ads')]")
+        if not watch_ads_btn:
+            print("❌ 未发现 [Watch Ads] 确认按钮", flush=True)
+            return
+
+        print("👉 点击 [✓ Watch Ads] 进入广告播放流...", flush=True)
+        driver.execute_script("arguments[0].click();", watch_ads_btn[0])
+        time.sleep(3)
+
+        # 4. 在同一个模态框内连续观看 3 轮广告 (0/3 ➜ 3/3)
+        completed = 0
+        for current_ad in range(1, 4):
+            print(f"\n🎬 === 正在准备第 {current_ad}/3 个广告 ===", flush=True)
+
+            # 等待出现 'Ad ready.' 及绿色的 [Watch ad] 按钮（最长等 25 秒加载）
+            watch_ad_btn = None
+            for _ in range(25):
+                candidates = driver.find_elements(
+                    By.XPATH,
+                    "//button[translate(text(), 'WATCH AD', 'watch ad')='watch ad' or text()='Watch ad']"
+                )
+                for c in candidates:
+                    if c.is_displayed():
+                        watch_ad_btn = c
+                        break
+                if watch_ad_btn:
+                    break
+                time.sleep(1)
+
+            if not watch_ad_btn:
+                print(f"  ⚠️ 未能在模态框内等到第 {current_ad} 个广告的 [Watch ad] 按钮", flush=True)
                 break
-            print(f"  ✅ 第 {i} 轮广告流程执行完毕", flush=True)
-            time.sleep(4)
 
-        # 3. 刷新页面验证最新剩余时长
-        print("\n⏳ 所有轮次完毕，等待 6 秒后端写入并刷新验证...", flush=True)
-        time.sleep(6)
+            print(f"  👉 点击第 {current_ad} 个广告的绿色 [Watch ad] 按钮...", flush=True)
+            driver.execute_script("arguments[0].click();", watch_ad_btn)
+            time.sleep(3)
+
+            # 寻找并点击广告的 Close
+            wait_and_click_ad_close(driver, max_wait_sec=40)
+            completed += 1
+            print(f"  ✅ 第 {current_ad} 个广告观看完成！", flush=True)
+            time.sleep(3)
+
+        # 5. 等待后端落库并刷新
+        print("\n⏳ 广告流完毕，等待 8 秒后端落库后刷新页面...", flush=True)
+        time.sleep(8)
         driver.refresh()
-        time.sleep(4)
+        time.sleep(5)
         dismiss_pwa_popups(driver)
 
         expire_info_after = get_expire_info(driver)
+        now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
         driver.save_screenshot("final_page.png")
 
         tg_send(
             f"📋 <b>VOER Host 自动续期汇总</b>\n\n"
+            f"🎬 <b>观看广告：</b><code>{completed}/3</code> 轮\n"
             f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
             f"⏰ <b>执行时间：</b><code>{now}</code>",
             photo_path="final_page.png",
