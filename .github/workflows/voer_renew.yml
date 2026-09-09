@@ -2,7 +2,7 @@ name: VOER Host Auto Renew
 
 on:
   schedule:
-    - cron: '0 */3 * * *'  # 每 3 小时自动巡检续期
+    - cron: '25 */3 * * *' # 每 3 小时自动巡检续期
   workflow_dispatch:
 
 jobs:
