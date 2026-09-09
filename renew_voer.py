@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动登录与看广告续期脚本 (ACLClouds 同构架构版)
+# VOER Host 自动登录与看广告续期脚本 (Cloudflare Turnstile 穿透版)
 # ============================================================
 import os
 import re
@@ -15,7 +15,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 
 BASE_URL = "https://voer.host"
-LOGIN_URL = f"{BASE_URL}/panel/login"
+LOGIN_URL = f"{BASE_URL}/login"
 SERVER_ID = "84a3ea1a-c2b4-4798-ba20-a6b83a4d7992"
 SERVER_CONSOLE_URL = f"{BASE_URL}/panel/server/{SERVER_ID}"
 
@@ -97,12 +97,11 @@ def start_gost(socks_proxy: str) -> subprocess.Popen:
 
 
 def dismiss_pwa_popups(driver):
-    """清理遮挡界面的弹窗"""
     try:
         btns = driver.find_elements(
             By.XPATH,
             "//button[translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='close' "
-            "or contains(., 'Close') or contains(., 'Dismiss')]"
+            "or contains(., 'Close') or contains(., 'Dismiss') or contains(., 'Accept')]"
         )
         for b in btns:
             if b.is_displayed():
@@ -116,14 +115,12 @@ def get_expire_info(driver) -> str:
     dismiss_pwa_popups(driver)
     expire_info = "未知"
     try:
-        # 1. 优先获取精准的 hh:mm:ss 格式
         elems = driver.find_elements(By.XPATH, "//*[contains(text(), ':') and string-length(text()) <= 12]")
         for elem in elems:
             txt = elem.text.strip()
             if re.match(r'^\d{1,2}:\d{2}:\d{2}$', txt):
                 return f"剩余 {txt}"
 
-        # 2. 兜底在 body 中正则搜寻
         body_text = driver.get_text("body").replace("\u00a0", " ").replace("\u202f", " ")
         time_match = re.search(r'(?i)(?:Time Remaining|remaining|expire)[\s:]*([0-9]+:[0-9]+:[0-9]+)', body_text)
         if time_match:
@@ -155,19 +152,51 @@ def set_input_value(driver, element, value):
         pass
 
 
+def solve_cf_turnstile(driver):
+    """处理 Cloudflare Turnstile 验证框"""
+    print("  🛡️ 正在检测并处理 Cloudflare Turnstile 验证码...", flush=True)
+    time.sleep(2)
+    try:
+        driver.uc_gui_click_captcha()
+        print("  👉 已调用 UC 专用接口点击验证框", flush=True)
+    except Exception as e:
+        print(f"  ℹ️ UC 接口点击回退: {e}")
+        try:
+            cf_frames = driver.find_elements(By.CSS_SELECTOR, "iframe[src*='cloudflare'], iframe[src*='challenges']")
+            for frame in cf_frames:
+                driver.switch_to.frame(frame)
+                box = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox'], span.mark, .ctp-checkbox-label")
+                if box:
+                    driver.execute_script("arguments[0].click();", box[0])
+                    print("  👉 已穿透 iframe 勾选 Turnstile 复选框", flush=True)
+                driver.switch_to.default_content()
+        except Exception:
+            driver.switch_to.default_content()
+
+    # 等待 Turnstile 写入认证参数（最长等待 12 秒）
+    for _ in range(12):
+        has_token = driver.execute_script("""
+            const input = document.querySelector('input[name="cf-turnstile-response"]');
+            return input && input.value.length > 10;
+        """)
+        if has_token:
+            print("  🟢 Cloudflare Turnstile 验证通过，已成功生成 Response Token！", flush=True)
+            return True
+        time.sleep(1)
+    return False
+
+
 def wait_and_click_ad_close(driver, max_wait_sec=45):
     """穿透查找并点击广告右上角的 Close 按钮"""
     print(f"  ⏳ 正在等待广告播放结束出现 Close (最长 {max_wait_sec} 秒)...", flush=True)
     start_time = time.time()
 
     while time.time() - start_time < max_wait_sec:
-        # 1. 检测重度广告被拦截回退状态
         body_str = driver.get_text("body")
         if "removed a resource-heavy ad" in body_str or "Finding ad" in body_str:
             print("  ⚠️ 检测到重度广告被拦截重置，返回等待新广告...", flush=True)
             return False
 
-        # 2. 在主 DOM 寻找 Close 按钮
         try:
             close_buttons = driver.find_elements(
                 By.XPATH,
@@ -183,7 +212,6 @@ def wait_and_click_ad_close(driver, max_wait_sec=45):
         except Exception:
             pass
 
-        # 3. 穿透所有 iframe 进行检测
         try:
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             for frame in iframes:
@@ -230,7 +258,6 @@ def main():
         except Exception as e:
             print(f"⚠️ 代理启动失败：{e}，将尝试直连。")
 
-    # 禁用重度广告拦截机制
     chromium_args = [
         "--disable-heavy-ad-intervention",
         "--disable-features=HeavyAdIntervention,HeavyAdInterventionWarning",
@@ -239,12 +266,13 @@ def main():
     driver = Driver(uc=True, headless=False, proxy=uc_proxy, chromium_arg=" ".join(chromium_args))
 
     try:
-        # 1. 登录
+        # 1. 打开登录页面
         print(f"🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
         driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
-        time.sleep(4)
+        time.sleep(5)
+        dismiss_pwa_popups(driver)
 
-        user_selector = "input[name='user'], input[name='username'], input[name='email'], input[type='text'], input[type='email']"
+        user_selector = "input[type='email'], input[name='email'], input[name='username'], input[type='text']"
         driver.wait_for_element_visible(user_selector, timeout=25)
 
         user_elem = driver.find_element(By.CSS_SELECTOR, user_selector)
@@ -257,8 +285,12 @@ def main():
         print("  📝 已填入密码", flush=True)
         time.sleep(1)
 
-        print("🔑 正在点击 [Sign in] 按钮提交登录...", flush=True)
-        submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'Login') or contains(., 'Sign in')]")
+        # 2. 处理 Cloudflare Turnstile 验证码
+        solve_cf_turnstile(driver)
+        time.sleep(2)
+
+        print("🔑 正在点击 [Sign in] 提交登录...", flush=True)
+        submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'Sign in') or contains(., 'Login')]")
         try:
             submit_btn.click()
         except Exception:
@@ -277,16 +309,16 @@ def main():
 
         print(f"✅ 登录成功！当前页面: {driver.current_url}", flush=True)
 
-        # 2. 直达服务器控制台
+        # 3. 直达服务器控制台
         print(f"🔄 打开服务器控制台: {SERVER_CONSOLE_URL} ...", flush=True)
         driver.get(SERVER_CONSOLE_URL)
-        time.sleep(5)
+        time.sleep(6)
         dismiss_pwa_popups(driver)
 
         expire_info_before = get_expire_info(driver)
         print(f"⏳ 续期前服务器状态: {expire_info_before}", flush=True)
 
-        # 3. 寻找并点击 Extend 按钮
+        # 4. 寻找并点击 Extend 按钮
         extend_xpath = "//button[contains(., 'Extend')]"
         extend_elements = driver.find_elements(By.XPATH, extend_xpath)
         
@@ -311,14 +343,14 @@ def main():
             driver.execute_script("arguments[0].click();", extend_elements[0])
         time.sleep(2)
 
-        # 4. 点击会话弹窗中的 'Watch Ads' 确认按钮
+        # 5. 点击会话弹窗中的 'Watch Ads' 确认按钮
         watch_ads_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Watch Ads')]")
         if watch_ads_btns:
             print("👉 点击会话弹窗中的 [Watch Ads] 确认按钮...", flush=True)
             driver.execute_script("arguments[0].click();", watch_ads_btns[0])
             time.sleep(3)
 
-        # 5. 核心循环：连续处理 3 轮激励广告 (0/3 ➜ 3/3)
+        # 6. 核心循环：连续处理 3 轮激励广告 (0/3 ➜ 3/3)
         completed_rounds = 0
         attempts = 0
 
@@ -362,7 +394,7 @@ def main():
 
             time.sleep(3)
 
-        # 6. 等待后端落库并刷新页面检查最新时长
+        # 7. 等待后端入库并刷新验证
         print("\n⏳ 广告流程完毕，等待 6 秒后端写入并刷新验证...", flush=True)
         time.sleep(6)
         driver.refresh()
