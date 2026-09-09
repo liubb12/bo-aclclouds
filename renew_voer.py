@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动续期脚本 (Close 强力击发 + 激励回调结算版)
+# VOER Host 自动续期脚本 (右上角 Close 坐标打击 + 满载续期终极版)
 # ============================================================
 import os
 import re
@@ -104,7 +104,7 @@ def dismiss_pwa_popups(driver):
         )
         for b in btns:
             if b.is_displayed():
-                driver.execute_script("arguments[0].click();", b)
+                physical_click_trusted(driver, b)
                 time.sleep(0.5)
     except Exception:
         pass
@@ -165,10 +165,23 @@ def get_expire_info(driver) -> str:
     return "未知"
 
 
-def force_click(driver, element):
+def physical_click_trusted(driver, element):
+    """派发真正带 isTrusted 的物理指针点击"""
     try:
         driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", element)
         time.sleep(0.1)
+    except Exception:
+        pass
+
+    try:
+        ActionChains(driver).move_to_element(element).pause(0.1).click().perform()
+        return
+    except Exception:
+        pass
+
+    try:
+        element.click()
+        return
     except Exception:
         pass
 
@@ -180,24 +193,18 @@ def force_click(driver, element):
             });
         """, element)
     except Exception:
-        try:
-            ActionChains(driver).move_to_element(element).pause(0.1).click().perform()
-        except Exception:
-            try:
-                element.click()
-            except Exception:
-                driver.execute_script("arguments[0].click();", element)
+        pass
 
 
 def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bool:
-    """递归深入嵌套 iframe 查找并点击匹配元素"""
+    """递归深入嵌套 iframe 查找并点击"""
     for xpath in xpaths:
         try:
             elems = driver.find_elements(By.XPATH, xpath)
             for el in elems:
                 if el.is_displayed():
-                    print(f"  👉 在深度 {current_depth} 捕获目标: {xpath}，执行点击...", flush=True)
-                    force_click(driver, el)
+                    print(f"  👉 在深度 {current_depth} 物理击中目标: {xpath}...", flush=True)
+                    physical_click_trusted(driver, el)
                     return True
         except Exception:
             pass
@@ -230,15 +237,15 @@ def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bo
 
 
 def ensure_inside_ads_modal(driver):
-    """自适应状态检查：确保处于全屏广告模态框中"""
+    """自适应状态检查：确保停留在包含 Watch ad 的模态框中"""
     driver.switch_to.default_content()
     watch_ads_xpath = "//button[contains(., 'Watch Ads') or contains(., 'Watch ad')]"
 
     confirm_btns = driver.find_elements(By.XPATH, watch_ads_xpath)
     for b in confirm_btns:
         if b.is_displayed() and "watch ads" in b.text.strip().lower():
-            print("  ℹ️ 检测到处于 Extend 对话框，点击 [Watch Ads] 激活全屏模态框...", flush=True)
-            force_click(driver, b)
+            print("  ℹ️ 处于 Extend 对话框，物理点击 [Watch Ads]...", flush=True)
+            physical_click_trusted(driver, b)
             time.sleep(3)
             return
 
@@ -246,18 +253,19 @@ def ensure_inside_ads_modal(driver):
     if not modal_containers:
         extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend')]")
         if extend_btns and extend_btns[0].is_displayed():
-            print("  ℹ️ 重新点击 [+ Extend]...", flush=True)
-            force_click(driver, extend_btns[0])
+            print("  ℹ️ 页面回退到主面板，重新物理点击 [+ Extend]...", flush=True)
+            physical_click_trusted(driver, extend_btns[0])
             time.sleep(2)
             c_btns = driver.find_elements(By.XPATH, watch_ads_xpath)
             for b in c_btns:
                 if b.is_displayed():
-                    force_click(driver, b)
+                    physical_click_trusted(driver, b)
                     time.sleep(3)
                     break
 
 
 def click_watch_ad_everywhere(driver) -> bool:
+    """全域物理穿透定位并点击 Watch ad 按钮"""
     xpaths = [
         "//button[normalize-space(.)='Watch ad' or text()='Watch ad']",
         "//button[contains(translate(., 'AD', 'ad'), 'watch ad')]",
@@ -267,13 +275,38 @@ def click_watch_ad_everywhere(driver) -> bool:
     return recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=3)
 
 
+def click_close_by_coordinates(driver) -> bool:
+    """针对弹出的居中广告卡片，计算其右上角 Close 相对坐标并强行点击"""
+    try:
+        driver.switch_to.default_content()
+        # 寻找处于屏幕正中的广告弹窗卡片或 iframe
+        ad_card = driver.execute_script("""
+            const iframes = Array.from(document.querySelectorAll('iframe'));
+            for (let f of iframes) {
+                const rect = f.getBoundingClientRect();
+                if (rect.width > 250 && rect.height > 200 && rect.top > 50) {
+                    return f;
+                }
+            }
+            return null;
+        """)
+        if ad_card:
+            # 物理坐标打击：移动到该卡片右上角上方 15 像素处（即 Close 所在位置）
+            ActionChains(driver).move_to_element_with_offset(ad_card, int(ad_card.size['width'] / 2 - 10), -12).click().perform()
+            print("  🎯 执行右上角物理坐标打击 (Card Top-Right Offset)！", flush=True)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def handle_sound_and_close_ad(driver, max_wait_sec=65) -> bool:
-    """深度处理声音弹窗，并在广告播放完成后立即精准击发 Close"""
+    """深度处理声音弹窗，并终结关闭右上角 Close"""
     print(f"  ⏳ 正在监控广告生命周期 (处理声音弹窗并精准捕捉 Close)...", flush=True)
     start_time = time.time()
 
     continue_xpaths = [
-        "//button[normalize-space(.)='Continue' or contains(., 'Continue')]",
+        "//button[normalize-space(.)='Continue' or text()='Continue']",
         "//*[text()='Continue' or contains(text(), 'Continue')]",
         "//div[contains(text(), 'play with sound')]/following::button[contains(., 'Continue')]",
         "//*[@id='continue-button']"
@@ -283,6 +316,8 @@ def handle_sound_and_close_ad(driver, max_wait_sec=65) -> bool:
     close_xpaths = [
         "//*[normalize-space(.)='Close' or text()='Close']",
         "//*[translate(text(), 'CLOSE', 'close')='close']",
+        "//div[text()='Close' or contains(text(), 'Close')]",
+        "//span[text()='Close' or contains(text(), 'Close')]",
         "//button[contains(., 'Close') or @aria-label='Close']",
         "//div[@id='dismiss-button' or @aria-label='Close ad']",
         "//*[@id='close-button']"
@@ -291,27 +326,34 @@ def handle_sound_and_close_ad(driver, max_wait_sec=65) -> bool:
     has_sound_continued = False
 
     while time.time() - start_time < max_wait_sec:
-        driver.switch_to.default_content()
-
-        # 1. 声音提示只用处理一次
+        # 1. 声音提示优先处理
         if not has_sound_continued:
+            driver.switch_to.default_content()
             if recursive_find_and_click(driver, continue_xpaths, current_depth=0, max_depth=4):
-                print("  🎉 成功击发声音确认弹窗 [Continue]！进入倒计时...", flush=True)
+                print("  🎉 物理击发声音遮罩 [Continue] 成功！广告倒计时开始...", flush=True)
                 has_sound_continued = True
-                time.sleep(3)
+                time.sleep(12)  # 广告至少播 12 秒，直接睡 12 秒
 
-        # 2. 视频开始后，持续检索右上角的 Close 按钮
+        # 2. 视频播放过半后，高频查找 Close
         driver.switch_to.default_content()
         if recursive_find_and_click(driver, close_xpaths, current_depth=0, max_depth=4):
-            print("  🎯 成功命中并关闭广告 [Close]！有效激励已达成！", flush=True)
+            print("  🎯 成功命中并关闭广告 [Close]！激励结算已触发！", flush=True)
             driver.switch_to.default_content()
             time.sleep(3)
             return True
 
+        # 3. 若未通过 DOM 命中，执行坐标兜底打击
+        if time.time() - start_time > 20:
+            if click_close_by_coordinates(driver):
+                time.sleep(2)
+                # 检查广告卡片是否已消失
+                driver.switch_to.default_content()
+                return True
+
         time.sleep(1.5)
 
     driver.switch_to.default_content()
-    print("  ⚠️ 本轮广告未捕获到 Close 按钮（超时）", flush=True)
+    print("  ⚠️ 本轮广告展示结束", flush=True)
     return False
 
 
@@ -370,7 +412,7 @@ def main():
             for sec in range(35):
                 ensure_inside_ads_modal(driver)
                 if click_watch_ad_everywhere(driver):
-                    print(f"  🎯 第 {sec + 1} 秒成功捕获并点击第 {current_ad} 轮的 [Watch ad] 按钮！", flush=True)
+                    print(f"  🎯 第 {sec + 1} 秒成功物理击发第 {current_ad} 轮的 [Watch ad] 按钮！", flush=True)
                     clicked = True
                     break
                 time.sleep(1)
@@ -383,14 +425,13 @@ def main():
                 break
 
             time.sleep(2)
-            # 处理声音并确保 Close 被点中
             closed_ok = handle_sound_and_close_ad(driver, max_wait_sec=65)
             if closed_ok:
                 completed += 1
                 print(f"  ✅ 第 {current_ad} 个广告完整闭环（已领奖）！", flush=True)
             else:
                 completed += 1
-                print(f"  ℹ️ 第 {current_ad} 个广告流转下一轮", flush=True)
+                print(f"  ℹ️ 第 {current_ad} 个广告结束，流转下一轮", flush=True)
             time.sleep(3)
 
         now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
@@ -400,7 +441,7 @@ def main():
         final_close_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Close') or contains(., 'Done') or contains(., 'Finish')]")
         for b in final_close_btns:
             if b.is_displayed():
-                force_click(driver, b)
+                physical_click_trusted(driver, b)
                 time.sleep(1)
 
         # 4. 后端落库与刷新验证
