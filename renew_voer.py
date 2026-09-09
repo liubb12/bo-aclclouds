@@ -19,13 +19,18 @@ SERVER_URL = os.environ.get(
 def send_telegram(message: str):
     """发送 Telegram 消息通知"""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        print("⚠️ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过推送")
         return
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        requests.post(url, json=payload, timeout=15)
+        resp = requests.post(url, json=payload, timeout=15)
+        if resp.status_code == 200:
+            print("📨 Telegram 通知发送成功！")
+        else:
+            print(f"⚠️ Telegram 发送失败: {resp.text}")
     except Exception as e:
-        print(f"⚠️ Telegram 发送失败: {e}")
+        print(f"⚠️ Telegram 发送异常: {e}")
 
 def restore_session(driver, cookies_str: str):
     """注入 Cookie 会话"""
@@ -87,36 +92,42 @@ def trigger_start_if_offline(driver):
     return False
 
 def wait_and_get_dashboard_info(driver):
-    """显式轮询等待数据加载，并提取真实倒计时与今日进度"""
+    """显式轮询等待数据真实填充"""
     raw_time = "00:00:00"
     ext_prog = "未知"
     total_seconds = 0
 
-    print("⏳ 等待控制台数据动态渲染...")
-    # 最多轮询等待 20 秒，直到出现真实的倒计时或进度标识
-    for _ in range(20):
-        content = driver.page_source
+    print("⏳ 等待控制台数据动态渲染（最多 25 秒）...")
+    for i in range(25):
+        try:
+            # 优先从包含 Time Remaining 的区域查找时间文本
+            time_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'Time Remaining')]/following::*[contains(text(), ':')]")
+            for el in time_elements:
+                text = el.text.strip()
+                m = re.match(r"^(\d{2}):(\d{2}):(\d{2})$", text)
+                if m:
+                    sec = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+                    if sec > 0:
+                        total_seconds = sec
+                        raw_time = text
+                        break
 
-        # 匹配倒计时（过滤 00:00:00，优先捕获有效运行时间）
-        matches = re.findall(r"\b(\d{2}):(\d{2}):(\d{2})\b", content)
-        valid_match = None
-        for m in matches:
-            sec = int(m[0]) * 3600 + int(m[1]) * 60 + int(m[2])
-            if sec > 0:
-                valid_match = m
-                total_seconds = sec
-                raw_time = f"{m[0]}:{m[1]}:{m[2]}"
+            # 提取 Extensions today 类似 1/4 的字样
+            prog_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'Extensions today')]")
+            if prog_elements:
+                parent_text = prog_elements[0].find_element(By.XPATH, "..").text
+                m_prog = re.search(r"(\d+\s*/\s*\d+)", parent_text)
+                if m_prog:
+                    ext_prog = m_prog.group(1).replace(" ", "")
+
+            # 抓取到了非零时间和进度，或者 Extend 按钮已经就绪
+            extend_ready = len(driver.find_elements(By.XPATH, "//button[contains(., 'Extend')]")) > 0
+            if total_seconds > 0 and ext_prog != "未知":
+                print(f"✨ 控制台数据动态渲染完成！(第 {i+1} 秒)")
                 break
+        except Exception:
+            pass
 
-        # 匹配 Extensions today 1/4 等字样
-        ext_match = re.search(r"Extensions\s*today[^\d]*(\d+\s*/\s*\d+)", content, re.IGNORECASE)
-        if ext_match:
-            ext_prog = ext_match.group(1).replace(" ", "")
-
-        # 只要读到了有效倒计时或进度条即可认定页面渲染就绪
-        if valid_match or ext_prog != "未知":
-            print("✨ 控制台数据动态渲染完成！")
-            break
         time.sleep(1)
 
     return total_seconds, raw_time, ext_prog
@@ -181,11 +192,11 @@ def write_next_run(seconds_remaining: int, ext_prog: str):
         tomorrow_utc = (now_utc + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
         next_run = tomorrow_utc
     else:
-        # 如果读取到有效时间，提前 20 分钟唤醒；否则按 3 小时兜底
+        # 有剩余时间则提前 20 分钟唤醒；否则按 3 小时兜底
         if seconds_remaining > 1200:
             target_delay = seconds_remaining - 1200
         else:
-            target_delay = 10800  # 兜底 3 小时 (10800秒)
+            target_delay = 10800  # 兜底 3 小时
             
         target_delay = max(target_delay, 900)   # 最少 15 分钟
         target_delay = min(target_delay, 12600) # 最多 3.5 小时
@@ -199,7 +210,10 @@ def write_next_run(seconds_remaining: int, ext_prog: str):
 
 def main():
     print("=== Python 任务初始化启动 ===")
+    # 强制将浏览器分辨率初始化为 1920x1080，防止按钮被折叠
     driver = Driver(browser="chrome", headless=True)
+    driver.set_window_size(1920, 1080)
+
     rem_sec = 0
     raw_time = "00:00:00"
     ext_prog = "未知"
@@ -209,6 +223,7 @@ def main():
 
         print(f"🌐 打开控制台: {SERVER_URL} ...")
         driver.get(SERVER_URL)
+        time.sleep(3)
 
         if "/login" in driver.current_url:
             print("❌ 会话失效，请更新 VOER_COOKIES")
@@ -218,11 +233,11 @@ def main():
         print("✅ 控制台访问成功！")
         trigger_start_if_offline(driver)
 
-        # 显式轮询等待数据渲染完毕
+        # 显式等待并获取数据
         rem_sec, raw_time, ext_prog = wait_and_get_dashboard_info(driver)
         print(f"⏱️ 剩余时长: {raw_time} ({rem_sec}秒) | 进度: {ext_prog}")
 
-        # 检索 Extend 按钮
+        # 查找绿色的 + Extend 按钮
         extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend')]")
         target_extend = None
         for b in extend_btns:
@@ -237,12 +252,15 @@ def main():
             time.sleep(3)
             trigger_start_if_offline(driver)
 
+            # 续期成功后重新获取时间
             rem_sec, raw_time, ext_prog = wait_and_get_dashboard_info(driver)
-            msg = f"🎉 *VOER Host 续期成功*\n\n⏱️ 剩余时间：`{raw_time}`\n📊 额度进度：`{ext_prog}`"
+            msg = f"🎉 *VOER Host 续期成功*\n\n⏱️ 当前剩余时间：`{raw_time}`\n📊 额度进度：`{ext_prog}`"
             print(msg)
             send_telegram(msg)
         else:
             print("ℹ️ '+ Extend' 按钮不可用或今日额度已满。")
+            # 即使今日不可续期，也推送一条巡检状态让 Telegram 知晓当前情况
+            send_telegram(f"📋 *VOER Host 状态巡检*\n\n⏱️ 当前剩余：`{raw_time}`\n📊 额度进度：`{ext_prog}`\n💡 当前无需加时或额度已满。")
 
     finally:
         driver.quit()
