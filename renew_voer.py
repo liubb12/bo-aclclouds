@@ -45,6 +45,8 @@ def restore_session(driver, cookies_str: str):
 
     items = [item.strip() for item in cookies_str.split(";") if item.strip()]
     count = 0
+    injected_names = []
+    
     for item in items:
         if "=" in item:
             name, value = item.split("=", 1)
@@ -52,34 +54,29 @@ def restore_session(driver, cookies_str: str):
             if name.lower() in ["domain", "path", "expires", "samesite", "secure", "httponly"]:
                 continue
             try:
-                driver.add_cookie({
-                    "name": name,
-                    "value": value,
-                    "domain": ".voer.host",
-                    "path": "/"
-                })
+                driver.add_cookie({"name": name, "value": value})
+                injected_names.append(name)
                 count += 1
-            except Exception:
-                pass
-    print(f"📦 Cookie 注入完成 ({count} 项)")
+            except Exception as e:
+                print(f"  ⚠️ Cookie [{name}] 注入跳过: {e}")
+
+    print(f"📦 Cookie 注入完成 (共 {count} 项: {', '.join(injected_names)})")
 
 def trigger_start_if_offline(driver):
     """检测关机状态并点击 Start 唤醒"""
     try:
-        page_text = driver.find_element(By.TAG_NAME, "body").text
-        is_offline = "OFFLINE" in page_text or "STOPPED" in page_text
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        is_offline = "OFFLINE" in body_text or "STOPPED" in body_text
         start_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Start')]")
         
-        can_click_start = False
         target_btn = None
         for b in start_btns:
             if b.is_displayed() and b.is_enabled():
-                can_click_start = True
                 target_btn = b
                 break
 
-        if is_offline or can_click_start:
-            print("🚨 检测到服务器离线或处于关机状态！")
+        if is_offline or target_btn:
+            print("🚨 检测到服务器离线或关机状态！")
             if target_btn:
                 target_btn.click()
                 print("✅ 已点击 Start 启动开机！")
@@ -103,7 +100,6 @@ def wait_and_get_dashboard_info(driver):
         try:
             body_text = driver.find_element(By.TAG_NAME, "body").text
 
-            # 匹配 03:25:02 这类倒计时
             matches = re.findall(r"\b(\d{2}):(\d{2}):(\d{2})\b", body_text)
             for m in matches:
                 sec = int(m[0]) * 3600 + int(m[1]) * 60 + int(m[2])
@@ -112,8 +108,7 @@ def wait_and_get_dashboard_info(driver):
                     raw_time = f"{m[0]}:{m[1]}:{m[2]}"
                     break
 
-            # 匹配 1/4 进度
-            prog_match = re.search(r"(\d+/\d+)", body_text)
+            prog_match = re.search(r"(\d+\s*/\s*\d+)", body_text)
             if prog_match:
                 ext_prog = prog_match.group(1).replace(" ", "")
 
@@ -196,10 +191,10 @@ def write_next_run(seconds_remaining: int, ext_prog: str):
         if seconds_remaining > 1200:
             target_delay = seconds_remaining - 1200
         else:
-            target_delay = 10800  # 兜底 3 小时
+            target_delay = 10800
             
-        target_delay = max(target_delay, 900)   # 最少 15 分钟
-        target_delay = min(target_delay, 12600) # 最多 3.5 小时
+        target_delay = max(target_delay, 900)
+        target_delay = min(target_delay, 12600)
         next_run = now_utc + timedelta(seconds=target_delay)
 
     next_run_str = next_run.strftime("%Y-%m-%d %H:%M:%S")
@@ -211,13 +206,18 @@ def write_next_run(seconds_remaining: int, ext_prog: str):
 def main():
     print("=== Python 任务初始化启动 ===")
     
-    # 检测 SOCKS5_PROXY 配置并启动代理连接
-    proxy_url = "127.0.0.1:10808" if SOCKS5_PROXY else None
-    if proxy_url:
-        print(f"🛡️ 检测到 SOCKS5 代理，启用本地转发端口: {proxy_url}")
-        driver = Driver(browser="chrome", headless=True, proxy=proxy_url)
+    # 格式化代理参数：支持原生 socks5:// 直连
+    proxy_arg = None
+    if SOCKS5_PROXY:
+        raw_proxy = SOCKS5_PROXY.strip()
+        if not raw_proxy.startswith("socks5://"):
+            proxy_arg = f"socks5://{raw_proxy}"
+        else:
+            proxy_arg = raw_proxy
+        print(f"🛡️ 启用 SOCKS5 代理直连模式: {proxy_arg.split('@')[-1]}")
+        driver = Driver(browser="chrome", headless=True, proxy=proxy_arg)
     else:
-        print("🌐 未配置代理，使用直接连接")
+        print("🌐 未配置 SOCKS5 代理，使用直连模式")
         driver = Driver(browser="chrome", headless=True)
 
     driver.set_window_size(1920, 1080)
@@ -231,7 +231,7 @@ def main():
 
         print(f"🌐 打开控制台: {SERVER_URL} ...")
         driver.get(SERVER_URL)
-        time.sleep(3)
+        time.sleep(4)
 
         if "/login" in driver.current_url:
             print("❌ 会话失效，请更新 VOER_COOKIES")
