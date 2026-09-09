@@ -2,8 +2,8 @@ name: VOER Host Auto Renew
 
 on:
   schedule:
-    - cron: '0 */3 * * *'  # 每次续期加 4 小时，设定每 3 小时自动巡检续期一次
-  workflow_dispatch:       # 支持手动点击测试
+    - cron: '0 */3 * * *'  # 每 3 小时自动巡检续期
+  workflow_dispatch:
 
 jobs:
   renew:
@@ -39,6 +39,7 @@ jobs:
 
       - name: Run Renew Script
         env:
+          VOER_COOKIES: ${{ secrets.VOER_COOKIES }}
           VOER_USERNAME: ${{ secrets.VOER_USERNAME }}
           VOER_PASSWORD: ${{ secrets.VOER_PASSWORD }}
           SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
