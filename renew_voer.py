@@ -56,7 +56,7 @@ def restore_session(driver, cookies_str: str):
             "domain": ".voer.host",
             "path": "/"
         })
-        print("📦 Cookie [token] (domain: .voer.host, path: /) 注入成功！")
+        print("📦 Cookie [token] 注入成功！")
     except Exception:
         try:
             driver.add_cookie({"name": "token", "value": token_val, "path": "/"})
@@ -80,7 +80,7 @@ def dismiss_cookie_banner(driver):
         for btn in accept_btns:
             if btn.is_displayed():
                 btn.click()
-                print("🍪 已自动接受并关闭 Cookie 授权弹窗。")
+                print("🍪 已自动关闭 Cookie 弹窗。")
                 time.sleep(1)
                 break
     except Exception:
@@ -100,31 +100,31 @@ def trigger_start_if_offline(driver):
                 break
 
         if is_offline or target_btn:
-            print("🚨 检测到服务器处于离线/关机状态！")
+            print("🚨 检测到服务器离线，执行唤醒...")
             if target_btn:
                 target_btn.click()
-                print("✅ 已点击 Start 启动开机！")
+                print("✅ 已点击 Start 开机！")
                 time.sleep(5)
                 send_telegram("⚡ *VOER Host 自动唤醒*\n\n检测到服务器离线，已自动点击 Start 开机！")
                 return True
         else:
-            print("⚡ 服务器状态正常（RUNNING）。")
+            print("⚡ 服务器状态正常 (RUNNING)。")
     except Exception as e:
         print(f"⚠️ 唤醒检测跳过: {e}")
     return False
 
 def wait_and_get_dashboard_info(driver):
-    """通过整页文本捕获倒计时与进度"""
+    """精准捕获 Time Remaining 与 Extensions today 进度"""
     raw_time = "00:00:00"
     ext_prog = "未知"
     total_seconds = 0
 
-    print("⏳ 等待控制台数据动态渲染（最多 25 秒）...")
-    for i in range(25):
+    print("⏳ 等待控制台数据动态渲染（最多 20 秒）...")
+    for i in range(20):
         try:
             body_text = driver.find_element(By.TAG_NAME, "body").text
 
-            # 匹配 03:25:02 这类时间
+            # 1. 匹配 03:57:46 这类倒计时
             matches = re.findall(r"\b(\d{2}):(\d{2}):(\d{2})\b", body_text)
             for m in matches:
                 sec = int(m[0]) * 3600 + int(m[1]) * 60 + int(m[2])
@@ -133,13 +133,18 @@ def wait_and_get_dashboard_info(driver):
                     raw_time = f"{m[0]}:{m[1]}:{m[2]}"
                     break
 
-            # 匹配包含换行或空格的 X/20 或 X/4 额度进度，如 '0\n/20'
-            prog_match = re.search(r"(\d+)\s*/\s*(\d+)", body_text)
+            # 2. 精准匹配 Extensions today 下面的 1/4 或 4/4（规避 0/20 玩家数）
+            prog_match = re.search(r"Extensions\s*today[^\d]*(\d+\s*/\s*\d+)", body_text, re.IGNORECASE)
             if prog_match:
-                ext_prog = f"{prog_match.group(1)}/{prog_match.group(2)}"
+                ext_prog = prog_match.group(1).replace(" ", "")
+            else:
+                # 兜底匹配任意除 20 以外的进度或尾部进度
+                all_progs = re.findall(r"(\d+\s*/\s*[1-9]\b)", body_text)
+                if all_progs:
+                    ext_prog = all_progs[0].replace(" ", "")
 
             if total_seconds > 0 and ext_prog != "未知":
-                print(f"✨ 成功捕获真实数据 (第 {i+1} 秒): {raw_time} | 进度: {ext_prog}")
+                print(f"✨ 成功捕获真实数据 (第 {i+1} 秒): {raw_time} | 额度: {ext_prog}")
                 break
         except Exception:
             pass
@@ -148,15 +153,14 @@ def wait_and_get_dashboard_info(driver):
 
     try:
         driver.save_screenshot("debug_dashboard.png")
-        print("📸 已保存调试截图: debug_dashboard.png")
-    except Exception as e:
-        print(f"⚠️ 截图保存失败: {e}")
+    except Exception:
+        pass
 
     return total_seconds, raw_time, ext_prog
 
 def handle_ad_and_claim(driver):
-    """广告等待并穿透关闭"""
-    print("📺 广告播放中，等待 35 秒让奖励生效...")
+    """广告播放并关闭"""
+    print("📺 广告播放中，等待 35 秒结算奖励...")
     time.sleep(35)
 
     close_selectors = [
@@ -172,8 +176,6 @@ def handle_ad_and_claim(driver):
     ]
 
     closed = False
-
-    # 1. 顶层页面查找
     for xp in close_selectors:
         try:
             els = driver.find_elements(By.XPATH, xp)
@@ -187,7 +189,6 @@ def handle_ad_and_claim(driver):
         except Exception:
             pass
 
-    # 2. 穿透所有 iframe 内部查找
     if not closed:
         frames = driver.find_elements(By.TAG_NAME, "iframe")
         for f in frames:
@@ -208,21 +209,22 @@ def handle_ad_and_claim(driver):
             except Exception:
                 driver.switch_to.default_content()
 
-    # 3. 兜底策略：发送 ESC 键触发弹窗关闭
     if not closed:
         try:
             driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-            print("⌨️ 发送 ESC 兜底关闭弹窗")
+            print("⌨️ 发送 ESC 键兜底关闭弹窗")
         except Exception:
             pass
     else:
-        print("🎯 广告弹窗已成功关闭！")
+        print("🎯 广告弹窗关闭成功！")
 
     time.sleep(3)
 
 def write_next_run(seconds_remaining: int, ext_prog: str):
     """计算下次执行时间并写入 output.log"""
     now_utc = datetime.now(timezone.utc)
+    
+    # 判断是否满载 (例如 4/4)
     is_exhausted = False
     if "/" in ext_prog:
         cur, total = ext_prog.split("/", 1)
@@ -230,7 +232,7 @@ def write_next_run(seconds_remaining: int, ext_prog: str):
             is_exhausted = True
     
     if is_exhausted:
-        print("ℹ️ 今日额度已用尽，推算明日 UTC 00:05 重新进场...")
+        print("ℹ️ 今日额度已打满，推算明日 UTC 00:05 重新进场...")
         tomorrow_utc = (now_utc + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
         next_run = tomorrow_utc
     else:
@@ -257,7 +259,9 @@ def main():
 
     rem_sec = 0
     raw_time = "00:00:00"
+    init_time = "00:00:00"
     ext_prog = "未知"
+    ad_rounds = 0
 
     try:
         restore_session(driver, VOER_COOKIES)
@@ -276,30 +280,66 @@ def main():
         print("✅ 控制台访问成功！")
         trigger_start_if_offline(driver)
 
+        # 初始状态捕获
         rem_sec, raw_time, ext_prog = wait_and_get_dashboard_info(driver)
-        print(f"⏱️ 剩余时长: {raw_time} ({rem_sec}秒) | 进度: {ext_prog}")
+        init_time = raw_time
+        print(f"⏱️ 初始状态: 剩余 {init_time} | 今日进度: {ext_prog}")
 
-        extend_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Extend') or contains(., 'Extend')]")
-        target_extend = None
-        for b in extend_btns:
-            if b.is_displayed() and b.is_enabled():
-                target_extend = b
+        # 循环续期：只要按钮可点且今日额度没满，就连续看广告拉满
+        while True:
+            # 检查额度是否已达上限
+            if "/" in ext_prog:
+                cur, total = ext_prog.split("/", 1)
+                if cur.strip() == total.strip() and cur.strip() != "0":
+                    print(f"🛑 额度已达每日上限 ({ext_prog})，停止继续续期。")
+                    break
+
+            extend_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Extend') or contains(., 'Extend')]")
+            target_extend = None
+            for b in extend_btns:
+                if b.is_displayed() and b.is_enabled():
+                    target_extend = b
+                    break
+
+            if not target_extend:
+                print("ℹ️ '+ Extend' 按钮不可用或进入冷却。")
                 break
 
-        if target_extend:
-            print("🚀 检测到 '+ Extend' 可点击，开始观看广告续期...")
+            ad_rounds += 1
+            print(f"🚀 [第 {ad_rounds} 轮] 触发 '+ Extend'，开始观看广告...")
             target_extend.click()
             handle_ad_and_claim(driver)
             time.sleep(3)
             trigger_start_if_offline(driver)
 
+            # 更新最新时间与进度
             rem_sec, raw_time, ext_prog = wait_and_get_dashboard_info(driver)
-            msg = f"🎉 *VOER Host 续期完成*\n\n⏱️ 当前剩余时间：`{raw_time}`\n📊 额度进度：`{ext_prog}`"
-            print(msg)
-            send_telegram(msg)
+            print(f"⏱️ 第 {ad_rounds} 轮完成: 当前剩余 {raw_time} | 进度: {ext_prog}")
+
+            # 安全防卡死：单次最多看 4 轮
+            if ad_rounds >= 4:
+                break
+
+        # 统一汇总消息模板
+        now_beijing = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+        if ad_rounds > 0:
+            msg = (
+                f"📋 *VOER Host 自动续期汇总*\n\n"
+                f"🎬 *观看广告*：{ad_rounds} 轮 (额度: {ext_prog})\n"
+                f"⌛ *到期变动*：剩余 `{init_time}` ➔ 剩余 `{raw_time}`\n"
+                f"⏰ *执行时间*：`{now_beijing}`"
+            )
         else:
-            print("ℹ️ '+ Extend' 按钮不可用或今日额度已满。")
-            send_telegram(f"📋 *VOER Host 状态巡检*\n\n⏱️ 当前剩余：`{raw_time}`\n📊 额度进度：`{ext_prog}`\n💡 当前无需加时或额度已满。")
+            msg = (
+                f"📋 *VOER Host 状态巡检*\n\n"
+                f"⏱️ *当前剩余*：`{raw_time}`\n"
+                f"📊 *额度进度*：`{ext_prog}`\n"
+                f"💡 当前无需加时或额度已满。\n"
+                f"⏰ *执行时间*：`{now_beijing}`"
+            )
+
+        print(msg)
+        send_telegram(msg)
 
     finally:
         driver.quit()
