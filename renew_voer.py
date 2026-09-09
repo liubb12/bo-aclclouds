@@ -11,6 +11,7 @@ from selenium.webdriver.common.by import By
 VOER_COOKIES = os.environ.get("VOER_COOKIES", "").strip()
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
+SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 SERVER_URL = os.environ.get(
     "VOER_SERVER_URL",
     "https://voer.host/panel/server/84a3ea1a-c2b4-4798-ba20-a6b834ad7992"
@@ -102,7 +103,7 @@ def wait_and_get_dashboard_info(driver):
         try:
             body_text = driver.find_element(By.TAG_NAME, "body").text
 
-            # 匹配正规格式 03:25:02
+            # 匹配 03:25:02 这类倒计时
             matches = re.findall(r"\b(\d{2}):(\d{2}):(\d{2})\b", body_text)
             for m in matches:
                 sec = int(m[0]) * 3600 + int(m[1]) * 60 + int(m[2])
@@ -111,12 +112,11 @@ def wait_and_get_dashboard_info(driver):
                     raw_time = f"{m[0]}:{m[1]}:{m[2]}"
                     break
 
-            # 匹配 1/4 或 2/4 额度进度
-            prog_match = re.search(r"(\d+\s*/\s*\d+)", body_text)
+            # 匹配 1/4 进度
+            prog_match = re.search(r"(\d+/\d+)", body_text)
             if prog_match:
                 ext_prog = prog_match.group(1).replace(" ", "")
 
-            # 抓到真实时间与进度即完成
             if total_seconds > 0 and ext_prog != "未知":
                 print(f"✨ 成功捕获真实数据 (第 {i+1} 秒): {raw_time} | 进度: {ext_prog}")
                 break
@@ -125,7 +125,6 @@ def wait_and_get_dashboard_info(driver):
 
         time.sleep(1)
 
-    # 保存截图供 Artifacts 排查验证
     try:
         driver.save_screenshot("debug_dashboard.png")
         print("📸 已保存调试截图: debug_dashboard.png")
@@ -194,7 +193,6 @@ def write_next_run(seconds_remaining: int, ext_prog: str):
         tomorrow_utc = (now_utc + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
         next_run = tomorrow_utc
     else:
-        # 有剩余时间则提前 20 分钟唤醒；否则按 3 小时兜底
         if seconds_remaining > 1200:
             target_delay = seconds_remaining - 1200
         else:
@@ -212,7 +210,16 @@ def write_next_run(seconds_remaining: int, ext_prog: str):
 
 def main():
     print("=== Python 任务初始化启动 ===")
-    driver = Driver(browser="chrome", headless=True)
+    
+    # 检测 SOCKS5_PROXY 配置并启动代理连接
+    proxy_url = "127.0.0.1:10808" if SOCKS5_PROXY else None
+    if proxy_url:
+        print(f"🛡️ 检测到 SOCKS5 代理，启用本地转发端口: {proxy_url}")
+        driver = Driver(browser="chrome", headless=True, proxy=proxy_url)
+    else:
+        print("🌐 未配置代理，使用直接连接")
+        driver = Driver(browser="chrome", headless=True)
+
     driver.set_window_size(1920, 1080)
 
     rem_sec = 0
@@ -234,11 +241,9 @@ def main():
         print("✅ 控制台访问成功！")
         trigger_start_if_offline(driver)
 
-        # 显式等待并获取数据
         rem_sec, raw_time, ext_prog = wait_and_get_dashboard_info(driver)
         print(f"⏱️ 剩余时长: {raw_time} ({rem_sec}秒) | 进度: {ext_prog}")
 
-        # 查找绿色的 + Extend 按钮（兼顾 text() 与子节点包含）
         extend_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Extend') or contains(., 'Extend')]")
         target_extend = None
         for b in extend_btns:
@@ -253,7 +258,6 @@ def main():
             time.sleep(3)
             trigger_start_if_offline(driver)
 
-            # 续期成功后重新刷新获取时间
             rem_sec, raw_time, ext_prog = wait_and_get_dashboard_info(driver)
             msg = f"🎉 *VOER Host 续期成功*\n\n⏱️ 当前剩余时间：`{raw_time}`\n📊 额度进度：`{ext_prog}`"
             print(msg)
