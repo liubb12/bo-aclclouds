@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动登录与看广告续期脚本 (时序加固与物理交互版)
+# VOER Host 自动续期脚本 (Cookie 免密直登 + 广告穿透完整版)
 # ============================================================
 import os
 import re
@@ -13,7 +13,6 @@ from datetime import datetime, timezone, timedelta
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.action_chains import ActionChains
 
 BASE_URL = "https://voer.host"
 LOGIN_URL = f"{BASE_URL}/login"
@@ -23,6 +22,7 @@ SERVER_CONSOLE_URL = f"{BASE_URL}/panel/server/{SERVER_ID}"
 LOCAL_HTTP_PORT = 18080
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
+VOER_COOKIES = os.environ.get("VOER_COOKIES", "").strip()
 VOER_USERNAME = os.environ.get("VOER_USERNAME", "").strip()
 VOER_PASSWORD = os.environ.get("VOER_PASSWORD", "").strip()
 SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
@@ -113,6 +113,29 @@ def dismiss_pwa_popups(driver):
         pass
 
 
+def inject_cookies(driver, cookie_str: str, domain=".voer.host"):
+    """将请求标头里的整串 Cookie 注入浏览器"""
+    print("  🍪 正在解析并注入登录 Cookie...", flush=True)
+    parts = [c.strip() for c in cookie_str.split(";") if c.strip()]
+    for part in parts:
+        if "=" in part:
+            name, val = part.split("=", 1)
+            name = name.strip()
+            val = val.strip()
+            try:
+                driver.add_cookie({
+                    "name": name,
+                    "value": val,
+                    "domain": domain,
+                    "path": "/"
+                })
+            except Exception:
+                try:
+                    driver.add_cookie({"name": name, "value": val, "path": "/"})
+                except Exception:
+                    pass
+
+
 def get_expire_info(driver) -> str:
     dismiss_pwa_popups(driver)
     expire_info = "未知"
@@ -134,52 +157,6 @@ def get_expire_info(driver) -> str:
     except Exception as e:
         print(f"⚠️ 提取时间异常: {e}")
     return expire_info
-
-
-def physical_type(driver, element, value: str):
-    """纯物理方式聚焦、清空并输入"""
-    ActionChains(driver).move_to_element(element).click().pause(0.2).perform()
-    element.send_keys(Keys.CONTROL, "a")
-    time.sleep(0.1)
-    element.send_keys(Keys.BACKSPACE)
-    time.sleep(0.1)
-    for ch in value:
-        element.send_keys(ch)
-        time.sleep(0.03)
-    time.sleep(0.2)
-
-
-def solve_cf_turnstile(driver):
-    """处理 Cloudflare Turnstile 验证框"""
-    print("  🛡️ 正在检测并处理 Cloudflare Turnstile 验证码...", flush=True)
-    time.sleep(1.5)
-    try:
-        driver.uc_gui_click_captcha()
-        print("  👉 已调用 UC 专用接口点击验证框", flush=True)
-    except Exception as e:
-        print(f"  ℹ️ UC 接口点击回退: {e}")
-        try:
-            cf_frames = driver.find_elements(By.CSS_SELECTOR, "iframe[src*='cloudflare'], iframe[src*='challenges']")
-            for frame in cf_frames:
-                driver.switch_to.frame(frame)
-                box = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox'], span.mark, .ctp-checkbox-label")
-                if box:
-                    driver.execute_script("arguments[0].click();", box[0])
-                    print("  👉 已穿透 iframe 勾选 Turnstile 复选框", flush=True)
-                driver.switch_to.default_content()
-        except Exception:
-            driver.switch_to.default_content()
-
-    for _ in range(15):
-        has_token = driver.execute_script("""
-            const input = document.querySelector('input[name="cf-turnstile-response"]');
-            return input && input.value && input.value.length > 10;
-        """)
-        if has_token:
-            print("  🟢 Cloudflare Turnstile 验证通过，已成功生成 Response Token！", flush=True)
-            return True
-        time.sleep(1)
-    return False
 
 
 def wait_and_click_ad_close(driver, max_wait_sec=45):
@@ -239,9 +216,6 @@ def wait_and_click_ad_close(driver, max_wait_sec=45):
 
 def main():
     print("=== Python 任务初始化启动 ===", flush=True)
-    if not VOER_USERNAME or not VOER_PASSWORD:
-        print("❌ 未在 Secrets 中配置 VOER_USERNAME 或 VOER_PASSWORD", flush=True)
-        return
 
     gost_proc = None
     uc_proxy = None
@@ -254,6 +228,7 @@ def main():
         except Exception as e:
             print(f"⚠️ 代理启动失败：{e}，将尝试直连。")
 
+    # 禁用 Chrome 针对大流量广告的静默拦截策略
     chromium_args = [
         "--disable-heavy-ad-intervention",
         "--disable-features=HeavyAdIntervention,HeavyAdInterventionWarning",
@@ -262,68 +237,80 @@ def main():
     driver = Driver(uc=True, headless=False, proxy=uc_proxy, chromium_arg=" ".join(chromium_args))
 
     try:
-        # 1. 打开登录页面
-        print(f"🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
-        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
-        time.sleep(5)
-        dismiss_pwa_popups(driver)
+        logged_in = False
 
-        # 2. 先输入账号和密码，保证表单处于完整填写状态
-        user_selector = "input[type='email'], input[name='email'], input[name='username'], input[type='text']"
-        driver.wait_for_element_visible(user_selector, timeout=25)
-
-        user_elem = driver.find_element(By.CSS_SELECTOR, user_selector)
-        physical_type(driver, user_elem, VOER_USERNAME)
-        print(f"  📝 已填入账号: {VOER_USERNAME[:3]}***", flush=True)
-
-        pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
-        physical_type(driver, pwd_elem, VOER_PASSWORD)
-        print("  📝 已填入密码", flush=True)
-
-        # 点击空白区域触发失焦事件
-        try:
-            heading = driver.find_element(By.XPATH, "//h1 | //h2 | //div[contains(., 'Sign in to your account')]")
-            heading.click()
-        except Exception:
-            pass
-        time.sleep(1)
-
-        # 3. 此时表单已就绪，触发并等待 Turnstile 验证生成 Token
-        solve_cf_turnstile(driver)
-        time.sleep(2)
-
-        # 4. 物理点击提交按钮
-        print("🔑 正在物理点击 [Sign in] 按钮提交登录...", flush=True)
-        submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'Sign in') or contains(., 'Login')]")
-        try:
-            ActionChains(driver).move_to_element(submit_btn).pause(0.2).click().perform()
-        except Exception:
-            driver.execute_script("arguments[0].click();", submit_btn)
-
-        # 等待页面跳转离开 /login
-        for _ in range(15):
-            if "/login" not in driver.current_url.lower():
-                break
+        # 1. 优先使用 Cookie 免密直登
+        if VOER_COOKIES:
+            print("🔑 检测到已配置 VOER_COOKIES，执行 Cookie 注入直登...", flush=True)
+            driver.uc_open_with_reconnect(BASE_URL, reconnect_time=5)
+            time.sleep(2)
+            inject_cookies(driver, VOER_COOKIES)
             time.sleep(1)
 
-        if "/login" in driver.current_url.lower():
-            driver.save_screenshot("login_failed.png")
-            print("❌ 登录未成功跳转", flush=True)
-            tg_send("🔴 <b>VOER Host 登录失败</b>", photo_path="login_failed.png")
-            return
+            print(f"🔄 打开服务器控制台: {SERVER_CONSOLE_URL} ...", flush=True)
+            driver.get(SERVER_CONSOLE_URL)
+            time.sleep(6)
+            dismiss_pwa_popups(driver)
 
-        print(f"✅ 登录成功！当前页面: {driver.current_url}", flush=True)
+            if "/login" not in driver.current_url.lower():
+                print(f"🎉 Cookie 免密直登成功！当前页面: {driver.current_url}", flush=True)
+                logged_in = True
+            else:
+                print("⚠️ Cookie 未生效或已过期，将尝试密码登录...", flush=True)
 
-        # 5. 直达服务器控制台
-        print(f"🔄 打开服务器控制台: {SERVER_CONSOLE_URL} ...", flush=True)
-        driver.get(SERVER_CONSOLE_URL)
-        time.sleep(6)
+        # 2. 备用账号密码登录
+        if not logged_in:
+            if not VOER_USERNAME or not VOER_PASSWORD:
+                print("❌ 未配置可用 Cookie 且缺少完整账号密码，退出任务", flush=True)
+                return
+
+            print(f"🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
+            driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
+            time.sleep(5)
+            dismiss_pwa_popups(driver)
+
+            user_selector = "input[type='email'], input[name='email'], input[name='username'], input[type='text']"
+            driver.wait_for_element_visible(user_selector, timeout=25)
+
+            user_elem = driver.find_element(By.CSS_SELECTOR, user_selector)
+            user_elem.click()
+            time.sleep(0.2)
+            user_elem.send_keys(VOER_USERNAME)
+            print(f"  📝 已填入账号: {VOER_USERNAME[:3]}***", flush=True)
+
+            pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
+            pwd_elem.click()
+            time.sleep(0.2)
+            pwd_elem.send_keys(VOER_PASSWORD)
+            print("  📝 已填入密码", flush=True)
+
+            print("  ⏳ 等待 Cloudflare Turnstile 验证...", flush=True)
+            time.sleep(6)
+
+            submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'Sign in') or contains(., 'Login')]")
+            driver.execute_script("arguments[0].click();", submit_btn)
+
+            for _ in range(15):
+                if "/login" not in driver.current_url.lower():
+                    break
+                time.sleep(1)
+
+            if "/login" in driver.current_url.lower():
+                driver.save_screenshot("login_failed.png")
+                print("❌ 登录未成功跳转", flush=True)
+                tg_send("🔴 <b>VOER Host 登录失败</b>", photo_path="login_failed.png")
+                return
+
+            print(f"✅ 登录成功！当前页面: {driver.current_url}", flush=True)
+            print(f"🔄 打开服务器控制台: {SERVER_CONSOLE_URL} ...", flush=True)
+            driver.get(SERVER_CONSOLE_URL)
+            time.sleep(6)
+
         dismiss_pwa_popups(driver)
-
         expire_info_before = get_expire_info(driver)
         print(f"⏳ 续期前服务器状态: {expire_info_before}", flush=True)
 
-        # 6. 寻找并点击 Extend 按钮
+        # 3. 寻找并点击 Extend 按钮
         extend_xpath = "//button[contains(., 'Extend')]"
         extend_elements = driver.find_elements(By.XPATH, extend_xpath)
         
@@ -348,14 +335,14 @@ def main():
             driver.execute_script("arguments[0].click();", extend_elements[0])
         time.sleep(2)
 
-        # 7. 点击会话弹窗中的 'Watch Ads' 确认按钮
+        # 4. 点击会话弹窗中的 'Watch Ads' 确认按钮
         watch_ads_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Watch Ads')]")
         if watch_ads_btns:
             print("👉 点击会话弹窗中的 [Watch Ads] 确认按钮...", flush=True)
             driver.execute_script("arguments[0].click();", watch_ads_btns[0])
             time.sleep(3)
 
-        # 8. 核心循环：连续处理 3 轮激励广告 (0/3 ➜ 3/3)
+        # 5. 核心循环：连续处理 3 轮激励广告 (0/3 ➜ 3/3)
         completed_rounds = 0
         attempts = 0
 
@@ -399,7 +386,7 @@ def main():
 
             time.sleep(3)
 
-        # 9. 等待后端落库并刷新验证
+        # 6. 等待后端落库并刷新验证
         print("\n⏳ 广告流程完毕，等待 6 秒后端写入并刷新验证...", flush=True)
         time.sleep(6)
         driver.refresh()
