@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动续期脚本 (UC 底层物理驱动 + 激励广告闭环版)
+# VOER Host 自动续期脚本 (弹窗强制唤起 + 模态框广告流闭环版)
 # ============================================================
 import os
 import re
@@ -13,6 +13,7 @@ import requests
 from datetime import datetime, timezone, timedelta
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
 
 BASE_URL = "https://voer.host"
 SERVER_ID = "84a3ea1a-c2b4-4798-ba20-a6b83a4d7992"
@@ -164,14 +165,30 @@ def get_expire_info(driver) -> str:
     return "未知"
 
 
+def force_click(driver, element):
+    """派发全套鼠标事件以确保 React 受控组件接收到点击"""
+    try:
+        driver.execute_script("""
+            const el = arguments[0];
+            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                el.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+            });
+        """, element)
+    except Exception:
+        try:
+            ActionChains(driver).move_to_element(element).pause(0.2).click().perform()
+        except Exception:
+            element.click()
+
+
 def wait_and_click_ad_close(driver, max_wait_sec=40):
-    """跨 DOM 和 iframe 物理点击广告 Close 按钮"""
-    print(f"  ⏳ 等待广告展示结束并出现 Close (最长 {max_wait_sec} 秒)...", flush=True)
+    """查找并点击广告的 Close 按钮"""
+    print(f"  ⏳ 等待广告播放结束出现 Close (最长 {max_wait_sec} 秒)...", flush=True)
     start_time = time.time()
-    time.sleep(10)
+    time.sleep(8)
 
     while time.time() - start_time < max_wait_sec:
-        # 1. 主页面层
+        # 主页面查找
         try:
             close_btns = driver.find_elements(
                 By.XPATH,
@@ -179,17 +196,14 @@ def wait_and_click_ad_close(driver, max_wait_sec=40):
             )
             for btn in close_btns:
                 if btn.is_displayed():
-                    print("  👉 在主 DOM 发现 Close 按钮，执行 UC 真实点击...", flush=True)
-                    try:
-                        driver.uc_click(btn)
-                    except Exception:
-                        driver.execute_script("arguments[0].click();", btn)
+                    print("  👉 在主 DOM 发现 Close 按钮，执行点击...", flush=True)
+                    force_click(driver, btn)
                     time.sleep(2)
                     return True
         except Exception:
             pass
 
-        # 2. iframe 内部
+        # iframe 穿透查找
         try:
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             for frame in iframes:
@@ -203,10 +217,7 @@ def wait_and_click_ad_close(driver, max_wait_sec=40):
                     for btn in sub_close:
                         if btn.is_displayed():
                             print("  👉 在广告 iframe 内部发现 Close 按钮，执行点击...", flush=True)
-                            try:
-                                driver.uc_click(btn)
-                            except Exception:
-                                driver.execute_script("arguments[0].click();", btn)
+                            force_click(driver, btn)
                             driver.switch_to.default_content()
                             time.sleep(2)
                             return True
@@ -264,32 +275,47 @@ def main():
         expire_info_before = get_expire_info(driver)
         print(f"⏳ 续期前服务器状态: {expire_info_before}", flush=True)
 
-        # 2. 点击 [+ Extend] 按钮
-        extend_selector = "//button[contains(., 'Extend')]"
-        driver.wait_for_element_visible(extend_selector, timeout=20)
-        print("👉 使用 UC 物理引擎真实点击 [+ Extend] 按钮...", flush=True)
-        driver.uc_click(extend_selector)
-        time.sleep(2.5)
+        # 2. 强制唤起 Extend 弹窗（循环尝试，直到弹窗真正打开）
+        modal_opened = False
+        watch_ads_xpath = "//button[contains(., 'Watch Ads') or contains(., 'Watch ad')]"
 
-        # 3. 点击第一个小弹窗里的确认按钮 [Watch Ads]
-        confirm_selector = "//button[contains(., 'Watch Ads') or contains(., 'Watch ad')]"
-        driver.wait_for_element_visible(confirm_selector, timeout=15)
-        print("👉 使用 UC 物理引擎点击 [Watch Ads] 进入看广告模态框...", flush=True)
-        driver.uc_click(confirm_selector)
+        for attempt in range(1, 4):
+            print(f"👉 正在尝试第 {attempt} 次点击 [+ Extend] 唤起弹窗...", flush=True)
+            extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend')]")
+            if not extend_btns:
+                print("ℹ️ 未发现 Extend 按钮，可能次数已满", flush=True)
+                return
+
+            force_click(driver, extend_btns[0])
+            time.sleep(2)
+
+            # 检测 Watch Ads 确认按钮是否已出现在页面上
+            confirm_btns = driver.find_elements(By.XPATH, watch_ads_xpath)
+            if confirm_btns and confirm_btns[0].is_displayed():
+                print("  🎉 成功唤起 Extend Session 弹窗！", flush=True)
+                modal_opened = True
+                break
+            time.sleep(1)
+
+        if not modal_opened:
+            driver.save_screenshot("failed_open_extend_modal.png")
+            print("❌ 未能成功弹出 Extend Session 对话框", flush=True)
+            return
+
+        # 3. 点击绿色确认按钮 [✓ Watch Ads] 进入全屏广告模态框
+        watch_btn_target = driver.find_element(By.XPATH, watch_ads_xpath)
+        print("👉 点击确认 [Watch Ads] 启动广告模态框...", flush=True)
+        force_click(driver, watch_btn_target)
         time.sleep(4)
 
-        # 截图验证是否成功进入了黑色全屏模态框
-        driver.save_screenshot("entered_ads_modal.png")
-
-        # 4. 模态框广告流循环 (1/3 -> 2/3 -> 3/3)
+        # 4. 在全屏大模态框内依次观看 3 个激励广告
         completed = 0
         for current_ad in range(1, 4):
             print(f"\n🎬 === 正在准备第 {current_ad}/3 个广告 ===", flush=True)
 
-            watch_btn_selector = None
-            # 持续等待绿色卡片里的 [Watch ad] 挂载就绪（最长等 30 秒）
-            for sec in range(30):
-                # 优先匹配卡片内的 Watch ad 按钮
+            watch_btn = None
+            # 等待 Ad ready. 及绿色卡片里的 [Watch ad] 按钮
+            for sec in range(35):
                 candidates = driver.find_elements(
                     By.XPATH,
                     "//div[contains(., 'Rewarded ad')]//button[contains(., 'Watch')] | "
@@ -297,20 +323,20 @@ def main():
                 )
                 for btn in candidates:
                     if btn.is_displayed():
-                        watch_btn_selector = btn
+                        watch_btn = btn
                         break
-                if watch_btn_selector:
+                if watch_btn:
                     print(f"  🎯 第 {sec + 1} 秒捕获到物理就绪的 [Watch ad] 按钮！", flush=True)
                     break
                 time.sleep(1)
 
-            if not watch_btn_selector:
+            if not watch_btn:
                 driver.save_screenshot(f"missing_btn_round_{current_ad}.png")
                 print(f"  ⚠️ 未能在模态框内等到第 {current_ad} 轮的 [Watch ad] 按钮", flush=True)
                 break
 
-            print(f"  👉 使用 UC 物理点击第 {current_ad} 轮的 [Watch ad] 按钮...", flush=True)
-            driver.uc_click(watch_btn_selector)
+            print(f"  👉 点击第 {current_ad} 轮的 [Watch ad] 按钮...", flush=True)
+            force_click(driver, watch_btn)
             time.sleep(3)
 
             # 等待广告播放完毕并点击 Close
@@ -319,7 +345,7 @@ def main():
             print(f"  ✅ 第 {current_ad} 个广告观看完成！", flush=True)
             time.sleep(4)
 
-        # 5. 等待落库并刷新验证
+        # 5. 等待落库刷新验证
         print("\n⏳ 广告流完毕，等待 8 秒后端落库后刷新页面...", flush=True)
         time.sleep(8)
         driver.refresh()
