@@ -1,0 +1,55 @@
+name: VOER Host Auto Renew
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'  # 每次续期加 4 小时，设定每 3 小时自动巡检续期一次
+  workflow_dispatch:       # 支持手动点击测试
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
+      - name: Install Python Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install seleniumbase requests
+          sbase install chromedriver
+
+      - name: Install gost (Proxy)
+        run: |
+          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+          gzip -d gost-linux-amd64-2.11.5.gz
+          sudo mv gost-linux-amd64-2.11.5 /usr/local/bin/gost
+          chmod +x /usr/local/bin/gost
+
+      - name: Run Renew Script
+        env:
+          VOER_USERNAME: ${{ secrets.VOER_USERNAME }}
+          VOER_PASSWORD: ${{ secrets.VOER_PASSWORD }}
+          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          xvfb-run -a -s "-screen 0 1920x1080x24" python -u renew_voer.py
+
+      - name: 上传排查截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voer-screenshots
+          path: "*.png"
