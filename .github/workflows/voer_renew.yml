@@ -2,7 +2,7 @@ name: VOER Host Auto Renew
 
 on:
   schedule:
-    - cron: '8 18 9 9 *'
+    - cron: '0 */4 * * *'
   workflow_dispatch:
 
 jobs:
@@ -31,7 +31,6 @@ jobs:
           VOER_COOKIES: ${{ secrets.VOER_COOKIES }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
         run: |
           touch output.log
           xvfb-run -a -s "-screen 0 1920x1080x24" python -u renew_voer.py 2>&1 | tee -a output.log
