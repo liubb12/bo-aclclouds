@@ -33,57 +33,47 @@ def send_telegram(message: str):
         print(f"⚠️ Telegram 发送异常: {e}")
 
 def restore_session(driver, cookies_str: str):
-    """同时注入 Cookie 与 LocalStorage/SessionStorage"""
+    """精准提取并挂载包含 domain 和 path 的 Token"""
     print("🔑 执行会话注入恢复...")
     if not cookies_str:
         print("❌ 错误: VOER_COOKIES 为空！")
         sys.exit(1)
 
-    # 提取纯 token 值（兼容输入 key=value 或纯 JWT 字符串）
-    pure_token = cookies_str.strip()
-    if "token=" in pure_token:
-        for part in pure_token.split(";"):
-            part = part.strip()
-            if part.startswith("token="):
-                pure_token = part.split("token=", 1)[1].strip()
-                break
+    # 1. 精准提取纯 JWT Token 字符串
+    token_match = re.search(r"token=([^;\s]+)", cookies_str)
+    if token_match:
+        token_val = token_match.group(1).strip()
+    else:
+        token_val = cookies_str.split(";")[0].strip()
 
-    # 1. 访问站点建立域环境
+    # 2. 先访问根域以建立 Cookie 上下文
     driver.get("https://voer.host/")
     time.sleep(2)
 
-    # 2. 注入 Cookie
-    injected_count = 0
-    raw_items = [item.strip() for item in cookies_str.split(";") if item.strip()]
-    for item in raw_items:
-        if "=" in item:
-            name, value = item.split("=", 1)
-            name, value = name.strip(), value.strip()
-            if name.lower() in ["domain", "path", "expires", "samesite", "secure", "httponly"]:
-                continue
-            try:
-                driver.add_cookie({"name": name, "value": value, "path": "/"})
-                injected_count += 1
-            except Exception:
-                pass
-        else:
-            # 兼容直接传入单一 token 字符串的情况
-            try:
-                driver.add_cookie({"name": "token", "value": item, "path": "/"})
-                injected_count += 1
-            except Exception:
-                pass
+    # 3. 注入带 .voer.host 根域的 Cookie
+    try:
+        driver.add_cookie({
+            "name": "token",
+            "value": token_val,
+            "domain": ".voer.host",
+            "path": "/"
+        })
+        print("📦 Cookie [token] (domain: .voer.host, path: /) 注入成功！")
+    except Exception as e:
+        print(f"⚠️ 指定 domain 失败，回退默认注入: {e}")
+        try:
+            driver.add_cookie({"name": "token", "value": token_val, "path": "/"})
+        except Exception:
+            pass
 
-    print(f"📦 Cookie 注入完成 (共 {injected_count} 项)")
-
-    # 3. 注入 LocalStorage 与 SessionStorage（供 SPA 前端接口鉴权使用）
+    # 4. 同步注入 LocalStorage 与 SessionStorage（SPA 前端框架关键鉴权点）
     try:
         driver.execute_script(f"""
-            localStorage.setItem('token', '{pure_token}');
-            localStorage.setItem('auth_token', '{pure_token}');
-            sessionStorage.setItem('token', '{pure_token}');
+            localStorage.setItem('token', '{token_val}');
+            localStorage.setItem('auth_token', '{token_val}');
+            sessionStorage.setItem('token', '{token_val}');
         """)
-        print("💾 本地存储 (LocalStorage/SessionStorage) 挂载完成！")
+        print("💾 本地存储 (LocalStorage/SessionStorage) 同步挂载就绪！")
     except Exception as e:
         print(f"⚠️ 本地存储注入异常: {e}")
 
@@ -125,7 +115,7 @@ def wait_and_get_dashboard_info(driver):
         try:
             body_text = driver.find_element(By.TAG_NAME, "body").text
 
-            # 匹配类似 03:25:02 的倒计时
+            # 匹配 03:25:02 这类格式
             matches = re.findall(r"\b(\d{2}):(\d{2}):(\d{2})\b", body_text)
             for m in matches:
                 sec = int(m[0]) * 3600 + int(m[1]) * 60 + int(m[2])
@@ -134,7 +124,7 @@ def wait_and_get_dashboard_info(driver):
                     raw_time = f"{m[0]}:{m[1]}:{m[2]}"
                     break
 
-            # 匹配 Extensions today 1/4 等字样
+            # 匹配 1/4 等字样
             prog_match = re.search(r"(\d+\s*/\s*\d+)", body_text)
             if prog_match:
                 ext_prog = prog_match.group(1).replace(" ", "")
@@ -220,8 +210,8 @@ def write_next_run(seconds_remaining: int, ext_prog: str):
         else:
             target_delay = 10800  # 兜底 3 小时
             
-        target_delay = max(target_delay, 900)   # 最小 15 分钟
-        target_delay = min(target_delay, 12600) # 最大 3.5 小时
+        target_delay = max(target_delay, 900)   # 最少 15 分钟
+        target_delay = min(target_delay, 12600) # 最多 3.5 小时
         next_run = now_utc + timedelta(seconds=target_delay)
 
     next_run_str = next_run.strftime("%Y-%m-%d %H:%M:%S")
@@ -240,12 +230,14 @@ def main():
     ext_prog = "未知"
 
     try:
+        # 执行增强注入
         restore_session(driver, VOER_COOKIES)
 
         print(f"🌐 打开控制台: {SERVER_URL} ...")
         driver.get(SERVER_URL)
         time.sleep(3)
-        # 刷新页面，触发前端框架通过注入的 Token 重新请求用户数据
+
+        # 再次刷新以唤醒前端框架读取 LocalStorage/Cookie
         driver.refresh()
         time.sleep(3)
 
