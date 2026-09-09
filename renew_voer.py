@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动登录与看广告续期脚本 (ACLClouds 同构架构完整版)
+# VOER Host 自动登录与看广告续期脚本 (表单事件穿透 + 回车提交版)
 # ============================================================
 import os
 import re
@@ -135,30 +135,37 @@ def get_expire_info(driver) -> str:
     return expire_info
 
 
-def safe_input(driver, element, value: str):
-    """真实模拟点击、清空并逐字输入"""
+def robust_input(driver, element, value: str):
+    """强力注入输入并触发所有前端状态事件"""
     try:
         element.click()
-        time.sleep(0.3)
+        time.sleep(0.2)
         element.send_keys(Keys.CONTROL, "a")
         element.send_keys(Keys.BACKSPACE)
-        time.sleep(0.1)
-        for ch in value:
-            element.send_keys(ch)
-            time.sleep(0.02)
+        element.send_keys(value)
+        # 通过原生 setter 赋值以防 React 状态未更新
         driver.execute_script("""
             const el = arguments[0];
+            const val = arguments[1];
+            const proto = Object.getPrototypeOf(el);
+            const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (desc && desc.set) {
+                desc.set.call(el, val);
+            } else {
+                el.value = val;
+            }
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
-        """, element)
-    except Exception:
-        pass
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+        """, element, value)
+    except Exception as e:
+        print(f"⚠️ 输入异常: {e}")
 
 
 def solve_cf_turnstile(driver):
     """处理 Cloudflare Turnstile 验证框"""
     print("  🛡️ 正在检测并处理 Cloudflare Turnstile 验证码...", flush=True)
-    time.sleep(2)
+    time.sleep(1.5)
     try:
         driver.uc_gui_click_captcha()
         print("  👉 已调用 UC 专用接口点击验证框", flush=True)
@@ -268,35 +275,42 @@ def main():
     driver = Driver(uc=True, headless=False, proxy=uc_proxy, chromium_arg=" ".join(chromium_args))
 
     try:
-        # 1. 打开登录页面并输入信息
+        # 1. 打开登录页面
         print(f"🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
         driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
         time.sleep(5)
         dismiss_pwa_popups(driver)
 
+        # 2. 优先完成 Cloudflare Turnstile 人机验证
+        solve_cf_turnstile(driver)
+        time.sleep(1)
+
+        # 3. 填入账号与密码
         user_selector = "input[type='email'], input[name='email'], input[name='username'], input[type='text']"
         driver.wait_for_element_visible(user_selector, timeout=25)
 
         user_elem = driver.find_element(By.CSS_SELECTOR, user_selector)
-        safe_input(driver, user_elem, VOER_USERNAME)
+        robust_input(driver, user_elem, VOER_USERNAME)
         print(f"  📝 已填入账号: {VOER_USERNAME[:3]}***", flush=True)
         time.sleep(1)
 
         pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
-        safe_input(driver, pwd_elem, VOER_PASSWORD)
+        robust_input(driver, pwd_elem, VOER_PASSWORD)
         print("  📝 已填入密码", flush=True)
         time.sleep(1.5)
 
-        # 2. 处理 Cloudflare Turnstile 验证码
-        solve_cf_turnstile(driver)
-        time.sleep(2)
+        # 4. 提交登录：优先在密码框直接回车，若未跳转再点 Sign in 按钮
+        print("🔑 正在提交登录 (密码框发送回车)...", flush=True)
+        pwd_elem.send_keys(Keys.ENTER)
+        time.sleep(3)
 
-        print("🔑 正在点击 [Sign in] 提交登录...", flush=True)
-        submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'Sign in') or contains(., 'Login')]")
-        try:
-            submit_btn.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", submit_btn)
+        if "/login" in driver.current_url.lower():
+            print("  ℹ️ 回车后仍在登录页，尝试点击 [Sign in] 按钮提交...", flush=True)
+            submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'Sign in') or contains(., 'Login')]")
+            try:
+                submit_btn.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", submit_btn)
 
         for _ in range(15):
             if "/login" not in driver.current_url.lower():
@@ -311,7 +325,7 @@ def main():
 
         print(f"✅ 登录成功！当前页面: {driver.current_url}", flush=True)
 
-        # 3. 直达服务器控制台
+        # 5. 直达服务器控制台
         print(f"🔄 打开服务器控制台: {SERVER_CONSOLE_URL} ...", flush=True)
         driver.get(SERVER_CONSOLE_URL)
         time.sleep(6)
@@ -320,7 +334,7 @@ def main():
         expire_info_before = get_expire_info(driver)
         print(f"⏳ 续期前服务器状态: {expire_info_before}", flush=True)
 
-        # 4. 寻找并点击 Extend 按钮
+        # 6. 寻找并点击 Extend 按钮
         extend_xpath = "//button[contains(., 'Extend')]"
         extend_elements = driver.find_elements(By.XPATH, extend_xpath)
         
@@ -345,14 +359,14 @@ def main():
             driver.execute_script("arguments[0].click();", extend_elements[0])
         time.sleep(2)
 
-        # 5. 点击会话弹窗中的 'Watch Ads' 确认按钮
+        # 7. 点击会话弹窗中的 'Watch Ads' 确认按钮
         watch_ads_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Watch Ads')]")
         if watch_ads_btns:
             print("👉 点击会话弹窗中的 [Watch Ads] 确认按钮...", flush=True)
             driver.execute_script("arguments[0].click();", watch_ads_btns[0])
             time.sleep(3)
 
-        # 6. 核心循环：连续处理 3 轮激励广告 (0/3 ➜ 3/3)
+        # 8. 核心循环：连续处理 3 轮激励广告 (0/3 ➜ 3/3)
         completed_rounds = 0
         attempts = 0
 
@@ -396,7 +410,7 @@ def main():
 
             time.sleep(3)
 
-        # 7. 等待后端落库并刷新验证
+        # 9. 等待后端落库并刷新验证
         print("\n⏳ 广告流程完毕，等待 6 秒后端写入并刷新验证...", flush=True)
         time.sleep(6)
         driver.refresh()
