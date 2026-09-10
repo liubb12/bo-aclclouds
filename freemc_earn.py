@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Freemchosting 自动赚积分脚本 (直达 /rewards + Unlockr自适应闭环版)
+# Freemchosting 自动赚积分脚本 (LootLabs 任务墙深度穿透修复版)
 # ============================================================
 import os
 import re
@@ -21,7 +21,6 @@ sys.stdout.reconfigure(line_buffering=True)
 BASE_URL = "https://dash.freemchosting.com"
 LOGIN_URL = f"{BASE_URL}/login"
 DASHBOARD_URL = f"{BASE_URL}/dashboard"
-# 最终确认的官方任务直达地址
 REWARDS_URL = f"{BASE_URL}/rewards"
 
 LOCAL_HTTP_PORT = 18080
@@ -270,7 +269,6 @@ def parse_daily_limit_and_balance(driver) -> tuple:
     balance_str = "未知"
     try:
         body_text = driver.get_text("body")
-        # 匹配 5 / 15
         m = re.search(r"(\d+)\s*/\s*15", body_text)
         if m:
             current_count = int(m.group(1))
@@ -287,22 +285,34 @@ def parse_daily_limit_and_balance(driver) -> tuple:
     return current_count, balance_str
 
 
+def wait_for_lootlabs_ready(driver, timeout=30) -> bool:
+    """循环等待 LootLabs 任务墙真正渲染出任务卡片"""
+    print("  ⏳ 等待 LootLabs 任务卡片 DOM 挂载渲染...", flush=True)
+    start = time.time()
+    while time.time() - start < timeout:
+        body = driver.get_text("body")
+        if "Complete Tasks to Continue" in body or "CONFIRM YOU ARE HUMAN" in body:
+            print("  ✅ LootLabs 任务容器已就绪！", flush=True)
+            return True
+        time.sleep(1.5)
+    return False
+
+
 def run_single_task_loop(driver, round_num: int) -> bool:
     main_tab = driver.current_window_handle
 
-    # 直达任务页
     if driver.current_url != REWARDS_URL:
         driver.get(REWARDS_URL)
         time.sleep(4)
 
-    # 1. 寻找 Generate reward 按钮
+    # 1. 查找 Generate reward
     gen_btns = driver.find_elements(By.XPATH, "//button[normalize-space(.)='Generate reward' or contains(., 'Generate reward')]")
     if gen_btns and gen_btns[0].is_displayed():
         print(f"  👉 点击 [Generate reward] 生成第 {round_num} 轮任务...", flush=True)
         physical_click_trusted(driver, gen_btns[0])
         time.sleep(3)
 
-    # 2. 深度等待 Start reward 就绪（最长等待 25 秒）
+    # 2. 等待 Start reward 出现
     start_btn = None
     print("  ⏳ 等待异步接口返回 [Start reward]...", flush=True)
     for wait_i in range(25):
@@ -315,7 +325,7 @@ def run_single_task_loop(driver, round_num: int) -> bool:
                 start_btn = sb
                 break
         if start_btn:
-            print(f"  ✅ 在第 {wait_i + 1} 秒检测到 [Start reward] 按钮亮起！", flush=True)
+            print(f"  ✅ 在第 {wait_i + 1} 秒检测到 [Start reward] 亮起！", flush=True)
             break
 
         if wait_i == 6:
@@ -327,64 +337,79 @@ def run_single_task_loop(driver, round_num: int) -> bool:
         time.sleep(1)
 
     if not start_btn:
-        print(f"  ⚠️ 第 {round_num} 轮超时未能出现 [Start reward] 按钮，保存截图...", flush=True)
+        print(f"  ⚠️ 第 {round_num} 轮超时未能出现 [Start reward] 按钮，保存现场截图...", flush=True)
         driver.save_screenshot(f"fail_no_start_r{round_num}.png")
         return False
 
     old_handles = set(driver.window_handles)
-    print("  👉 击发 [Start reward]，唤起 Unlockr 任务外链...", flush=True)
+    print("  👉 击发 [Start reward]，唤起 LootLabs 任务外链...", flush=True)
     physical_click_trusted(driver, start_btn)
     time.sleep(5)
 
-    # 3. 捕捉新打开的 Unlockr 标签页
+    # 3. 切换到 LootLabs 标签页
     new_handles = set(driver.window_handles) - old_handles
     if not new_handles:
         if len(driver.window_handles) > 1:
-            unlockr_tab = driver.window_handles[-1]
+            lootlabs_tab = driver.window_handles[-1]
         else:
             print("  ⚠️ 点击后未检测到新标签页弹出，保存现场截图...", flush=True)
             driver.save_screenshot(f"fail_no_tab_r{round_num}.png")
             return False
     else:
-        unlockr_tab = list(new_handles)[0]
+        lootlabs_tab = list(new_handles)[0]
 
-    driver.switch_to.window(unlockr_tab)
-    time.sleep(4)
-    print(f"  🌐 已切入 Unlockr 任务墙: {driver.current_url}", flush=True)
+    driver.switch_to.window(lootlabs_tab)
+    time.sleep(3)
+    print(f"  🌐 已切入 LootLabs: {driver.current_url}", flush=True)
 
-    # 4. 解析任务时长与击发任务 1
+    # 关键防卡点：深度等待 LootLabs 任务容器挂载
+    if not wait_for_lootlabs_ready(driver, timeout=25):
+        print("  ⚠️ LootLabs 任务卡片未能正常渲染（可能白屏或需要人机），截图中...", flush=True)
+        driver.save_screenshot(f"fail_lootlabs_loading_r{round_num}.png")
+        return False
+
+    # 4. 解析任务 1 时长并点击触发
     wait_sec = 50
     try:
         body_text = driver.get_text("body")
         sec_m = re.search(r"~(\d+)\s*sec", body_text)
         if sec_m:
             wait_sec = int(sec_m.group(1))
-            print(f"  ⏱️ 动态识别到任务时长：~{wait_sec} 秒", flush=True)
+            print(f"  ⏱️ 动态识别到任务 1 需求时长：~{wait_sec} 秒", flush=True)
         else:
-            print("  ℹ️ 采用基准等待 60 秒", flush=True)
+            print("  ℹ️ 未检测到具体秒数，采用基准等待 60 秒", flush=True)
             wait_sec = 60
 
-        task1_arrow_xpaths = [
-            "(//div[contains(., 'Complete Tasks to Continue')]/following::button[.//svg])[1]",
-            "(//div[contains(., 'Complete Tasks to Continue')]//button)[1]",
-            "(//button[.//svg or contains(@class, 'arrow')])[1]"
+        # 精确锁定任务 1 行（通过其父级容器中的第一项）
+        task1_selectors = [
+            "//*[contains(text(), 'Complete Tasks to Continue')]/following::div[contains(@class, 'cursor-pointer') or .//button][1]",
+            "(//*[contains(text(), 'Complete Tasks to Continue')]/following::*[contains(@class, 'rounded') and (.//button or .//svg)])[1]",
+            "//*[contains(text(), 'Complete Tasks to Continue')]/following::button[1]",
+            "(//button[.//svg])[last()-1]"
         ]
+
         arrow1_clicked = False
-        for xp in task1_arrow_xpaths:
-            els = driver.find_elements(By.XPATH, xp)
+        for sel in task1_selectors:
+            els = driver.find_elements(By.XPATH, sel)
             if els and els[0].is_displayed():
-                print("  👉 点击任务 1 箭头 ➔ 唤起广告/文章...", flush=True)
+                print(f"  👉 锁定并点击任务 1 交互项 (选择器: {sel[:40]}...)", flush=True)
                 physical_click_trusted(driver, els[0])
                 arrow1_clicked = True
                 break
 
         if not arrow1_clicked:
-            print("  ⚠️ 未能定位任务 1 箭头，执行兜底点击...")
-            driver.execute_script("const b = document.querySelector('div[class*=\"task\"] button, button'); if(b) b.click();")
+            print("  ⚠️ XPath 精确查找未果，通过 JS 向上查找第一项并点击...")
+            driver.execute_script("""
+                const header = Array.from(document.querySelectorAll('*')).find(el => el.textContent.includes('Complete Tasks to Continue'));
+                if (header) {
+                    const task = header.parentElement.querySelector('button, [class*="cursor-pointer"]');
+                    if (task) task.click();
+                }
+            """)
 
         time.sleep(3)
 
-        # 4.1 如果弹出了广告外链标签页，切过去挂机等待倒计时
+        # 如果弹出了广告新窗口，切过去挂机等待
         if len(driver.window_handles) > 2:
             ad_tab = driver.window_handles[-1]
             driver.switch_to.window(ad_tab)
@@ -394,7 +419,7 @@ def run_single_task_loop(driver, round_num: int) -> bool:
                 driver.close()
             except Exception:
                 pass
-            driver.switch_to.window(unlockr_tab)
+            driver.switch_to.window(lootlabs_tab)
         else:
             print(f"  ⏳ 就地挂机等待倒计时 {wait_sec + 15} 秒...", flush=True)
             time.sleep(wait_sec + 15)
@@ -403,20 +428,21 @@ def run_single_task_loop(driver, round_num: int) -> bool:
         print(f"  ⚠️ 处理任务 1 挂机阶段提示: {e}", flush=True)
 
     time.sleep(3)
-    driver.switch_to.window(unlockr_tab)
+    driver.switch_to.window(lootlabs_tab)
 
     # 5. 处理任务 2：CONFIRM YOU ARE HUMAN
     try:
-        print("🛡️ 正在寻找并点击 [CONFIRM YOU ARE HUMAN]...", flush=True)
-        human_xpaths = [
-            "//*[contains(text(), 'CONFIRM YOU ARE HUMAN') or contains(text(), 'Confirm you are human')]",
-            "(//div[contains(., 'Complete Tasks to Continue')]/following::button[.//svg])[2]",
-            "(//button[.//svg or contains(@class, 'arrow')])[2]"
+        print("🛡️ 正在寻找并点击 [CONFIRM YOU ARE HUMAN] 验证项...", flush=True)
+        human_selectors = [
+            "//*[contains(text(), 'CONFIRM YOU ARE HUMAN')]/ancestor::div[contains(@class, 'cursor-pointer') or .//button][1]",
+            "//*[contains(text(), 'CONFIRM YOU ARE HUMAN')]",
+            "//*[contains(text(), 'Complete Tasks to Continue')]/following::button[2]"
         ]
-        for xp in human_xpaths:
-            els = driver.find_elements(By.XPATH, xp)
+        for sel in human_selectors:
+            els = driver.find_elements(By.XPATH, sel)
             if els and els[0].is_displayed():
                 physical_click_trusted(driver, els[0])
+                print("  👉 已点击展开人机验证卡片！", flush=True)
                 break
         time.sleep(3)
 
@@ -424,15 +450,15 @@ def run_single_task_loop(driver, round_num: int) -> bool:
         solve_turnstile_box(driver, max_wait_sec=25)
         time.sleep(2)
 
-        # 关键点击：Turnstile 成功后的蓝色 Continue 按钮
-        continue_xpaths = [
+        # 点击图 1 里的蓝色 Continue 按钮
+        continue_selectors = [
             "//button[normalize-space(.)='Continue' or text()='Continue']",
             "//button[contains(., 'Continue')]"
         ]
         for _ in range(8):
             clicked_c = False
-            for xp in continue_xpaths:
-                els = driver.find_elements(By.XPATH, xp)
+            for sel in continue_selectors:
+                els = driver.find_elements(By.XPATH, sel)
                 for el in els:
                     if el.is_displayed():
                         physical_click_trusted(driver, el)
@@ -448,22 +474,23 @@ def run_single_task_loop(driver, round_num: int) -> bool:
         print(f"  ⚠️ 处理任务 2 人机验证提示: {e}", flush=True)
 
     time.sleep(3)
-    driver.switch_to.window(unlockr_tab)
+    driver.switch_to.window(lootlabs_tab)
 
     # 6. 最终点击蓝紫色 CLAIM REWARD
     claim_success = False
     try:
         print("🎁 等待打勾并击发 [CLAIM REWARD]...", flush=True)
-        claim_xpaths = [
+        claim_selectors = [
             "//button[contains(., 'CLAIM REWARD') or contains(., 'Claim reward') or contains(., 'Claim')]",
             "//*[contains(text(), 'CLAIM REWARD')]/ancestor::button",
             "//*[contains(text(), 'MISSION COMPLETE')]/preceding-sibling::button"
         ]
         for attempt in range(25):
-            for xp in claim_xpaths:
-                els = driver.find_elements(By.XPATH, xp)
+            for sel in claim_selectors:
+                els = driver.find_elements(By.XPATH, sel)
                 for el in els:
                     is_disabled = el.get_attribute("disabled")
+                    # 只要显示且未 disabled（或者类名没有 disabled）
                     if el.is_displayed() and not is_disabled:
                         physical_click_trusted(driver, el)
                         print("  🎉 成功击发 [CLAIM REWARD] 领取积分！", flush=True)
@@ -478,7 +505,7 @@ def run_single_task_loop(driver, round_num: int) -> bool:
     except Exception as e:
         print(f"  ⚠️ 点击领取奖励异常: {e}", flush=True)
 
-    # 7. 清理多余外链标签页，返回主页面
+    # 7. 清理多余标签页，返回 Freemchosting 控制台
     try:
         for handle in driver.window_handles:
             if handle != main_tab:
@@ -530,7 +557,7 @@ def main():
                 success_runs += 1
                 print(f"  ✅ 第 {target_round} 轮闭环完成！", flush=True)
             else:
-                print(f"  ⚠️ 第 {target_round} 轮未能领奖，刷新状态后重试...", flush=True)
+                print(f"  ⚠️ 第 {target_round} 轮未能领奖，刷新重试...", flush=True)
 
             time.sleep(6)
             driver.get(REWARDS_URL)
