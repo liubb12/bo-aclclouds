@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Freemchosting 自动赚积分脚本 (Packet Blocked 自动点击 HERE 破解版)
+# Freemchosting 自动赚积分脚本 (Cookie 修复版 & 5轮目标版)
 # ============================================================
 import os
 import re
@@ -161,8 +161,9 @@ def solve_turnstile_box(driver, max_wait_sec=30) -> bool:
 def login_freemc(driver):
     if FREEMC_COOKIES:
         print("🔑 尝试通过 Cookie 恢复会话...", flush=True)
-        driver.uc_open_with_reconnect(f"{BASE_URL}/robots.txt", reconnect_time=4)
-        time.sleep(2)
+        # 修复点：先打开主域名建立域上下文，再注入 Cookie 避免 invalid cookie domain 报错
+        driver.uc_open_with_reconnect(BASE_URL, reconnect_time=4)
+        time.sleep(3)
 
         inject_cookies(driver, FREEMC_COOKIES)
         time.sleep(1)
@@ -252,7 +253,6 @@ def wait_for_lootlabs_ready(driver, timeout=30) -> bool:
     while time.time() - start < timeout:
         body = driver.get_text("body")
 
-        # 核心：精准捕捉 Packet blocked 并点击 HERE 按钮
         if "Packet blocked" in body or "HERE" in body:
             print("  🚨 检测到 Packet blocked 软拦截，自动点击 [HERE] 刷新...", flush=True)
             try:
@@ -341,7 +341,6 @@ def run_single_task_loop(driver, round_num: int) -> bool:
     time.sleep(4)
     print(f"  🌐 已切入 LootLabs: {driver.current_url}", flush=True)
 
-    # 调用自动检测并点击 HERE 的雷达
     if not wait_for_lootlabs_ready(driver, timeout=30):
         print("  ⚠️ LootLabs 任务卡片未能就绪，记录现场...", flush=True)
         driver.save_screenshot(f"fail_lootlabs_loading_r{round_num}.png")
@@ -520,7 +519,7 @@ def main():
         current_count, balance_before = parse_daily_limit_and_balance(driver)
         print(f"📊 初始进度: {current_count}/15 | 计划轮数: {DAILY_TARGET} | 初始余额: {balance_before}", flush=True)
 
-        # 核心修改：只根据 DAILY_TARGET 轮数限制执行，不受 15/15 总限额强行拦截
+        # 核心：只根据 DAILY_TARGET 循环，雷打不动跑满 5 个任务
         while success_runs < DAILY_TARGET:
             target_round = current_count + 1
             print(f"\n🚀 === 执行第 {target_round} 轮赚积分任务 ===", flush=True)
