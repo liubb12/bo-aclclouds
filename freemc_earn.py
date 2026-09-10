@@ -569,7 +569,7 @@ def main():
         print(f"📊 初始进度: {current_count}/15 | 计划轮数: {DAILY_TARGET} | 初始余额: {balance_before}", flush=True)
 
         # 修复点 3：确保每次只看设定的 5 个广告，不再受总额强制停止的干扰
-        while success_runs < DAILY_TARGET:
+        while current_count < 15 and success_runs < DAILY_TARGET:
             target_round = current_count + 1
             print(f"\n🚀 === 执行第 {target_round} 轮赚积分任务 ===", flush=True)
             ok = run_single_task_loop(driver, target_round)
