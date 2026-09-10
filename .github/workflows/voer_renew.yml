@@ -2,7 +2,7 @@ name: VOER Host Auto Renew
 
 on:
   schedule:
-    - cron: '26 10 10 9 *'
+    - cron: '44 7 10 9 *'
   workflow_dispatch:
 
 jobs:
@@ -20,32 +20,28 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install & Connect Cloudflare WARP
+      - name: Install Gost Proxy & Dependencies
         run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update
-          sudo apt-get install -y cloudflare-warp
-          warp-cli --accept-tos registration new
-          warp-cli --accept-tos connect
-          sleep 5
-          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep warp
+          # 安装 gost 代理工具
+          wget -q https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20240125/gost_3.0.0-nightly.20240125_linux_amd64.tar.gz -O gost.tar.gz
+          tar -zxvf gost.tar.gz
+          sudo mv gost /usr/local/bin/
+          rm -f gost.tar.gz
 
-      - name: Install Dependencies
-        run: |
+          # 安装虚拟桌面及 Python 依赖
+          sudo apt-get update
           sudo apt-get install -y xvfb
           python -m pip install --upgrade pip
-          pip install playwright requests
-          playwright install chromium
-          playwright install-deps
+          pip install requests seleniumbase
+          sbase install chromedriver
 
       - name: Run Renew Script
         env:
           VOER_SERVER_ID: ${{ secrets.VOER_SERVER_ID }}
-          VOER_TOKEN: ${{ secrets.VOER_TOKEN }}
           VOER_COOKIES: ${{ secrets.VOER_COOKIES }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
         run: |
           touch output.log
           xvfb-run -a -s "-screen 0 1920x1080x24" python -u renew_voer.py 2>&1 | tee -a output.log
@@ -55,7 +51,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
-          path: debug_dashboard.png
+          path: |
+            *.png
           if-no-files-found: ignore
 
       - name: 更新 Cron
