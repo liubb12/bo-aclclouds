@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Freemchosting 自动赚积分脚本 (原生输入 + 严格强制过盾版)
+# Freemchosting 自动赚积分脚本 (增强表单检测 + Cookie/密码双模版)
 # ============================================================
 import os
 import re
@@ -24,6 +24,7 @@ EARN_CREDITS_URL = "https://dash.freemchosting.com/free"
 LOCAL_HTTP_PORT = 18080
 FREEMC_USER = os.environ.get("FREEMC_USER", "").strip()
 FREEMC_PASS = os.environ.get("FREEMC_PASS", "").strip()
+FREEMC_COOKIES = os.environ.get("FREEMC_COOKIES", "").strip()
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
@@ -33,13 +34,12 @@ DAILY_TARGET = 5
 
 def tg_send(text: str, photo_path: str = None):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("⚠️ 未配置 TG_BOT_TOKEN / TG_CHAT_ID，跳过通知。")
         return
     try:
         if photo_path and os.path.exists(photo_path):
             url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
             with open(photo_path, "rb") as f:
-                resp = requests.post(
+                requests.post(
                     url,
                     data={"chat_id": TG_CHAT_ID, "caption": text, "parse_mode": "HTML"},
                     files={"photo": f},
@@ -47,15 +47,11 @@ def tg_send(text: str, photo_path: str = None):
                 )
         else:
             url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-            resp = requests.post(
+            requests.post(
                 url,
                 data={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"},
                 timeout=30,
             )
-        if resp.status_code == 200:
-            print("  ✅ TG 通知发送成功")
-        else:
-            print(f"  ⚠️ TG 通知发送失败: {resp.text}")
     except Exception as e:
         print(f"  ⚠️ TG 通知异常: {e}")
 
@@ -73,8 +69,8 @@ def normalize_socks5_proxy(proxy_value: str) -> str:
 
 def wait_http_proxy_ready(port: int, timeout: int = 15):
     proxies = {"http": f"http://127.0.0.1:{port}", "https": f"http://127.0.0.1:{port}"}
-    last_error = None
     start = time.time()
+    last_error = None
     while time.time() - start < timeout:
         try:
             resp = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=8)
@@ -94,9 +90,9 @@ def start_gost(socks_proxy: str) -> subprocess.Popen:
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(2)
     if proc.poll() is not None:
-        raise RuntimeError("gost 启动失败，请检查 SOCKS5_PROXY 格式和 gost 安装。")
+        raise RuntimeError("gost 启动失败，请检查 SOCKS5_PROXY 格式。")
     wait_http_proxy_ready(LOCAL_HTTP_PORT)
-    print(f"  ✅ gost 已启动，本地代理端口：{LOCAL_HTTP_PORT}")
+    print(f"  ✅ gost 已启动，本地端口：{LOCAL_HTTP_PORT}")
     return proc
 
 
@@ -127,49 +123,9 @@ def physical_click_trusted(driver, element):
         pass
 
 
-def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bool:
-    for xpath in xpaths:
-        try:
-            elems = driver.find_elements(By.XPATH, xpath)
-            for el in elems:
-                if el.is_displayed():
-                    print(f"  👉 物理击中目标: {xpath.split('[')[0]}...", flush=True)
-                    physical_click_trusted(driver, el)
-                    return True
-        except Exception:
-            pass
-
-    if current_depth >= max_depth:
-        return False
-
-    try:
-        sub_frames = driver.find_elements(By.TAG_NAME, "iframe")
-    except Exception:
-        sub_frames = []
-
-    for idx in range(len(sub_frames)):
-        try:
-            frames = driver.find_elements(By.TAG_NAME, "iframe")
-            if idx >= len(frames):
-                break
-            driver.switch_to.frame(frames[idx])
-            found = recursive_find_and_click(driver, xpaths, current_depth + 1, max_depth)
-            driver.switch_to.parent_frame()
-            if found:
-                return True
-        except Exception:
-            try:
-                driver.switch_to.parent_frame()
-            except Exception:
-                pass
-
-    return False
-
-
 def solve_turnstile_box(driver, max_wait_sec=30) -> bool:
     driver.switch_to.default_content()
     start = time.time()
-    
     try:
         driver.uc_gui_click_captcha()
         time.sleep(2)
@@ -178,9 +134,17 @@ def solve_turnstile_box(driver, max_wait_sec=30) -> bool:
 
     while time.time() - start < max_wait_sec:
         driver.switch_to.default_content()
+        # 检查 Turnstile 隐藏 response 字段是否已经填充
+        has_token = driver.execute_script("""
+            const el = document.querySelector('[name="cf-turnstile-response"]');
+            return el && el.value && el.value.length > 10;
+        """)
+        if has_token:
+            print("  ✅ Turnstile 凭证 Token 获取成功", flush=True)
+            return True
+
         body = driver.get_text("body")
         if "成功" in body or "Success" in body:
-            print("  ✅ Turnstile 验证已处于通过状态", flush=True)
             return True
 
         try:
@@ -198,50 +162,77 @@ def solve_turnstile_box(driver, max_wait_sec=30) -> bool:
             driver.switch_to.default_content()
 
         time.sleep(1.5)
-        
+
     driver.switch_to.default_content()
     return False
 
 
 def login_freemc(driver):
+    # 模式一：支持 Cookie 恢复登录
+    if FREEMC_COOKIES:
+        print("🍪 尝试通过 Cookie 恢复会话...", flush=True)
+        driver.get("https://dash.freemchosting.com/robots.txt")
+        time.sleep(1)
+        for item in FREEMC_COOKIES.split(";"):
+            if "=" in item:
+                k, v = item.strip().split("=", 1)
+                try:
+                    driver.add_cookie({"name": k, "value": v, "domain": ".freemchosting.com", "path": "/"})
+                except Exception:
+                    pass
+        driver.get("https://dash.freemchosting.com/")
+        time.sleep(4)
+        if "/login" not in driver.current_url.lower():
+            print(f"  ✅ Cookie 登录生效，进入面板: {driver.current_url}")
+            return
+        print("  ⚠️ Cookie 已失效，回退至账号密码登录...")
+
+    # 模式二：账号密码 + 盾
     print("🔑 访问登录页...", flush=True)
     driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=6)
-    time.sleep(5)
+    time.sleep(4)
 
     if not FREEMC_USER or not FREEMC_PASS:
-        raise ValueError("❌ GitHub Secrets 中的 FREEMC_USER 或 FREEMC_PASS 为空，请检查配置！")
+        raise ValueError("❌ FREEMC_USER 或 FREEMC_PASS 为空，请检查配置！")
 
     print("⌨️ 输入账号密码...", flush=True)
-    driver.type("//input[@type='text' or @type='email' or @name='username']", FREEMC_USER)
+    driver.type("//input[@type='text' or @type='email' or @name='email' or @name='username']", FREEMC_USER)
     time.sleep(1)
     driver.type("//input[@type='password' or @name='password']", FREEMC_PASS)
     time.sleep(1)
 
     print("🛡️ 处理登录页 Turnstile...", flush=True)
-    passed = solve_turnstile_box(driver, max_wait_sec=30)
-    
-    # 强制验证逻辑：如果 Turnstile 没有成功打勾，直接终止，拒绝盲目提交
-    if not passed:
-        driver.save_screenshot("turnstile_failed.png")
-        raise RuntimeError("❌ Turnstile 人机验证超时未通过，终止提交表单。")
-
+    solve_turnstile_box(driver, max_wait_sec=30)
     time.sleep(2)
 
-    print("🚀 点击 Sign in 提交...", flush=True)
-    signin_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Sign in') or @type='submit']")
+    print("🚀 提交登录表单...", flush=True)
+    # 优先查找 submit 按钮或执行表单 submit
+    signin_btns = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(., 'Sign in') or contains(., 'Login')]")
     if signin_btns:
         physical_click_trusted(driver, signin_btns[0])
+    else:
+        driver.execute_script("document.querySelector('form').submit();")
 
     logged_in = False
-    for _ in range(25):
+    for _ in range(20):
+        time.sleep(1)
         if "/login" not in driver.current_url.lower():
             logged_in = True
             break
-        time.sleep(1)
 
     if not logged_in:
         driver.save_screenshot("login_failed.png")
-        raise RuntimeError(f"登录失败，可能密码错误或被拦截，停留在: {driver.current_url}")
+        # 抓取页面报错提示
+        err_texts = []
+        try:
+            alerts = driver.find_elements(By.XPATH, "//*[contains(@class, 'alert') or contains(@class, 'error') or contains(@role, 'alert')]")
+            for a in alerts:
+                if a.is_displayed() and a.text.strip():
+                    err_texts.append(a.text.strip())
+        except Exception:
+            pass
+        err_detail = " | ".join(err_texts) if err_texts else "无明确错误提示（可能 Turnstile 校验被拒或密码错误）"
+        raise RuntimeError(f"登录失败，停留在: {driver.current_url}。原因: {err_detail}")
 
     print(f"📍 登录成功，当前 URL: {driver.current_url}", flush=True)
 
@@ -294,7 +285,11 @@ def run_single_task_loop(driver) -> bool:
             "(//div[contains(., 'Complete Tasks to Continue')]/following::button[.//svg])[1]",
             "(//button[.//svg or contains(@class, 'arrow')])[1]"
         ]
-        recursive_find_and_click(driver, task1_arrow_xpaths, current_depth=0, max_depth=2)
+        for xp in task1_arrow_xpaths:
+            els = driver.find_elements(By.XPATH, xp)
+            if els and els[0].is_displayed():
+                physical_click_trusted(driver, els[0])
+                break
         time.sleep(3)
 
         if len(driver.window_handles) > 2:
@@ -313,21 +308,28 @@ def run_single_task_loop(driver) -> bool:
     driver.switch_to.default_content()
 
     try:
-        print("🛡️ 点击展开并完成人机验证...", flush=True)
+        print("🛡️ 处理任务人机验证...", flush=True)
         human_xpaths = [
             "//*[contains(text(), 'CONFIRM YOU ARE HUMAN') or contains(text(), 'Confirm you are human')]",
             "(//button[.//svg or contains(@class, 'arrow')])[2]"
         ]
-        recursive_find_and_click(driver, human_xpaths, current_depth=0, max_depth=2)
+        for xp in human_xpaths:
+            els = driver.find_elements(By.XPATH, xp)
+            if els and els[0].is_displayed():
+                physical_click_trusted(driver, els[0])
+                break
         time.sleep(3)
 
         solve_turnstile_box(driver, max_wait_sec=25)
 
         continue_xpaths = ["//button[normalize-space(.)='Continue' or text()='Continue']"]
-        for _ in range(10):
-            if recursive_find_and_click(driver, continue_xpaths, current_depth=0, max_depth=3):
-                print("  ✅ 已点击 Continue")
-                break
+        for _ in range(8):
+            for xp in continue_xpaths:
+                els = driver.find_elements(By.XPATH, xp)
+                if els and els[0].is_displayed():
+                    physical_click_trusted(driver, els[0])
+                    print("  ✅ 已点击 Continue")
+                    break
             time.sleep(2)
     except Exception as e:
         print(f"  ⚠️ 任务 2 提示: {e}")
@@ -337,11 +339,14 @@ def run_single_task_loop(driver) -> bool:
 
     try:
         claim_xpaths = ["//button[contains(., 'CLAIM REWARD') or contains(., 'Claim')]"]
-        for _ in range(10):
-            if recursive_find_and_click(driver, claim_xpaths, current_depth=0, max_depth=2):
-                print("  🎉 已点击 CLAIM REWARD！")
-                time.sleep(6)
-                break
+        for _ in range(8):
+            for xp in claim_xpaths:
+                els = driver.find_elements(By.XPATH, xp)
+                if els and els[0].is_displayed():
+                    physical_click_trusted(driver, els[0])
+                    print("  🎉 已点击 CLAIM REWARD！")
+                    time.sleep(6)
+                    break
             time.sleep(2)
     except Exception as e:
         print(f"  ⚠️ 领奖提示: {e}")
