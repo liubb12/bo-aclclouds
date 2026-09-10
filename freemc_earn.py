@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Freemchosting 自动赚积分脚本 (LootLabs 任务墙深度穿透修复版)
+# Freemchosting 自动赚积分脚本 (Packet Blocked 自动点击 HERE 破解版)
 # ============================================================
 import os
 import re
@@ -56,46 +56,6 @@ def tg_send(text: str, photo_path: str = None):
             )
     except Exception as e:
         print(f"  ⚠️ TG 通知异常: {e}")
-
-
-def normalize_socks5_proxy(proxy_value: str) -> str:
-    proxy_value = (proxy_value or "").strip()
-    for prefix in ("socks5://", "socks://"):
-        if proxy_value.startswith(prefix):
-            proxy_value = proxy_value[len(prefix):]
-            break
-    if not proxy_value or ":" not in proxy_value:
-        raise ValueError("SOCKS5_PROXY 格式错误，应为 host:port 或 user:pass@host:port。")
-    return proxy_value
-
-
-def wait_http_proxy_ready(port: int, timeout: int = 15):
-    proxies = {"http": f"http://127.0.0.1:{port}", "https": f"http://127.0.0.1:{port}"}
-    start = time.time()
-    last_error = None
-    while time.time() - start < timeout:
-        try:
-            resp = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=8)
-            if resp.ok:
-                print("  ✅ 本地 HTTP 代理连通性测试成功")
-                return
-        except Exception as e:
-            last_error = e
-        time.sleep(1)
-    raise RuntimeError(f"本地 HTTP 代理就绪检测失败: {last_error}")
-
-
-def start_gost(socks_proxy: str) -> subprocess.Popen:
-    normalized = normalize_socks5_proxy(socks_proxy)
-    cmd = ["gost", "-L", f"http://127.0.0.1:{LOCAL_HTTP_PORT}", "-F", f"socks5://{normalized}"]
-    print("  🚀 启动 gost 代理中转...")
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(2)
-    if proc.poll() is not None:
-        raise RuntimeError("gost 启动失败，请检查 SOCKS5_PROXY 格式。")
-    wait_http_proxy_ready(LOCAL_HTTP_PORT)
-    print(f"  ✅ gost 已启动，本地端口：{LOCAL_HTTP_PORT}")
-    return proc
 
 
 def physical_click_trusted(driver, element):
@@ -286,14 +246,33 @@ def parse_daily_limit_and_balance(driver) -> tuple:
 
 
 def wait_for_lootlabs_ready(driver, timeout=30) -> bool:
-    """循环等待 LootLabs 任务墙真正渲染出任务卡片"""
-    print("  ⏳ 等待 LootLabs 任务卡片 DOM 挂载渲染...", flush=True)
+    """智能检测 LootLabs 页面，若遇到 Packet blocked 则自动点击 HERE 刷新"""
+    print("  ⏳ 等待 LootLabs 页面就绪...", flush=True)
     start = time.time()
     while time.time() - start < timeout:
         body = driver.get_text("body")
+
+        # 核心：精准捕捉 Packet blocked 并点击 HERE 按钮
+        if "Packet blocked" in body or "HERE" in body:
+            print("  🚨 检测到 Packet blocked 软拦截，自动点击 [HERE] 刷新...", flush=True)
+            try:
+                here_els = driver.find_elements(By.XPATH, "//a[normalize-space(.)='HERE' or contains(., 'HERE')] | //u[contains(., 'HERE')] | //*[text()='HERE']")
+                if here_els:
+                    for h in here_els:
+                        if h.is_displayed():
+                            physical_click_trusted(driver, h)
+                            break
+                else:
+                    driver.execute_script("const a = Array.from(document.querySelectorAll('a, span, u')).find(el => el.textContent.trim() === 'HERE'); if(a) a.click();")
+            except Exception as e:
+                print(f"  ⚠️ 点击 HERE 异常: {e}")
+            time.sleep(3)
+            continue
+
         if "Complete Tasks to Continue" in body or "CONFIRM YOU ARE HUMAN" in body:
-            print("  ✅ LootLabs 任务容器已就绪！", flush=True)
+            print("  ✅ LootLabs 任务容器已成功加载！", flush=True)
             return True
+
         time.sleep(1.5)
     return False
 
@@ -337,7 +316,7 @@ def run_single_task_loop(driver, round_num: int) -> bool:
         time.sleep(1)
 
     if not start_btn:
-        print(f"  ⚠️ 第 {round_num} 轮超时未能出现 [Start reward] 按钮，保存现场截图...", flush=True)
+        print(f"  ⚠️ 第 {round_num} 轮超时未能出现 [Start reward] 按钮，保存截图...", flush=True)
         driver.save_screenshot(f"fail_no_start_r{round_num}.png")
         return False
 
@@ -352,23 +331,23 @@ def run_single_task_loop(driver, round_num: int) -> bool:
         if len(driver.window_handles) > 1:
             lootlabs_tab = driver.window_handles[-1]
         else:
-            print("  ⚠️ 点击后未检测到新标签页弹出，保存现场截图...", flush=True)
+            print("  ⚠️ 点击后未检测到新标签页弹出，保存截图...", flush=True)
             driver.save_screenshot(f"fail_no_tab_r{round_num}.png")
             return False
     else:
         lootlabs_tab = list(new_handles)[0]
 
     driver.switch_to.window(lootlabs_tab)
-    time.sleep(3)
+    time.sleep(4)
     print(f"  🌐 已切入 LootLabs: {driver.current_url}", flush=True)
 
-    # 关键防卡点：深度等待 LootLabs 任务容器挂载
-    if not wait_for_lootlabs_ready(driver, timeout=25):
-        print("  ⚠️ LootLabs 任务卡片未能正常渲染（可能白屏或需要人机），截图中...", flush=True)
+    # 调用自动检测并点击 HERE 的雷达
+    if not wait_for_lootlabs_ready(driver, timeout=30):
+        print("  ⚠️ LootLabs 任务卡片未能就绪，记录现场...", flush=True)
         driver.save_screenshot(f"fail_lootlabs_loading_r{round_num}.png")
         return False
 
-    # 4. 解析任务 1 时长并点击触发
+    # 4. 任务 1：自适应挂机与倒计时
     wait_sec = 50
     try:
         body_text = driver.get_text("body")
@@ -380,7 +359,6 @@ def run_single_task_loop(driver, round_num: int) -> bool:
             print("  ℹ️ 未检测到具体秒数，采用基准等待 60 秒", flush=True)
             wait_sec = 60
 
-        # 精确锁定任务 1 行（通过其父级容器中的第一项）
         task1_selectors = [
             "//*[contains(text(), 'Complete Tasks to Continue')]/following::div[contains(@class, 'cursor-pointer') or .//button][1]",
             "(//*[contains(text(), 'Complete Tasks to Continue')]/following::*[contains(@class, 'rounded') and (.//button or .//svg)])[1]",
@@ -392,13 +370,12 @@ def run_single_task_loop(driver, round_num: int) -> bool:
         for sel in task1_selectors:
             els = driver.find_elements(By.XPATH, sel)
             if els and els[0].is_displayed():
-                print(f"  👉 锁定并点击任务 1 交互项 (选择器: {sel[:40]}...)", flush=True)
+                print(f"  👉 锁定并点击任务 1 交互项...", flush=True)
                 physical_click_trusted(driver, els[0])
                 arrow1_clicked = True
                 break
 
         if not arrow1_clicked:
-            print("  ⚠️ XPath 精确查找未果，通过 JS 向上查找第一项并点击...")
             driver.execute_script("""
                 const header = Array.from(document.querySelectorAll('*')).find(el => el.textContent.includes('Complete Tasks to Continue'));
                 if (header) {
@@ -409,11 +386,10 @@ def run_single_task_loop(driver, round_num: int) -> bool:
 
         time.sleep(3)
 
-        # 如果弹出了广告新窗口，切过去挂机等待
         if len(driver.window_handles) > 2:
             ad_tab = driver.window_handles[-1]
             driver.switch_to.window(ad_tab)
-            print(f"  ⏳ 已切入广告挂机标签页，等待倒计时 {wait_sec + 15} 秒...", flush=True)
+            print(f"  ⏳ 切入外链标签页，挂机等待 {wait_sec + 15} 秒...", flush=True)
             time.sleep(wait_sec + 15)
             try:
                 driver.close()
@@ -425,12 +401,12 @@ def run_single_task_loop(driver, round_num: int) -> bool:
             time.sleep(wait_sec + 15)
 
     except Exception as e:
-        print(f"  ⚠️ 处理任务 1 挂机阶段提示: {e}", flush=True)
+        print(f"  ⚠️ 处理任务 1 阶段提示: {e}", flush=True)
 
     time.sleep(3)
     driver.switch_to.window(lootlabs_tab)
 
-    # 5. 处理任务 2：CONFIRM YOU ARE HUMAN
+    # 5. 任务 2：人机验证与 Continue
     try:
         print("🛡️ 正在寻找并点击 [CONFIRM YOU ARE HUMAN] 验证项...", flush=True)
         human_selectors = [
@@ -450,7 +426,6 @@ def run_single_task_loop(driver, round_num: int) -> bool:
         solve_turnstile_box(driver, max_wait_sec=25)
         time.sleep(2)
 
-        # 点击图 1 里的蓝色 Continue 按钮
         continue_selectors = [
             "//button[normalize-space(.)='Continue' or text()='Continue']",
             "//button[contains(., 'Continue')]"
@@ -476,7 +451,7 @@ def run_single_task_loop(driver, round_num: int) -> bool:
     time.sleep(3)
     driver.switch_to.window(lootlabs_tab)
 
-    # 6. 最终点击蓝紫色 CLAIM REWARD
+    # 6. 领奖：CLAIM REWARD
     claim_success = False
     try:
         print("🎁 等待打勾并击发 [CLAIM REWARD]...", flush=True)
@@ -490,7 +465,6 @@ def run_single_task_loop(driver, round_num: int) -> bool:
                 els = driver.find_elements(By.XPATH, sel)
                 for el in els:
                     is_disabled = el.get_attribute("disabled")
-                    # 只要显示且未 disabled（或者类名没有 disabled）
                     if el.is_displayed() and not is_disabled:
                         physical_click_trusted(driver, el)
                         print("  🎉 成功击发 [CLAIM REWARD] 领取积分！", flush=True)
@@ -505,7 +479,7 @@ def run_single_task_loop(driver, round_num: int) -> bool:
     except Exception as e:
         print(f"  ⚠️ 点击领取奖励异常: {e}", flush=True)
 
-    # 7. 清理多余标签页，返回 Freemchosting 控制台
+    # 7. 清理多余外链标签页
     try:
         for handle in driver.window_handles:
             if handle != main_tab:
@@ -526,17 +500,14 @@ def main():
 
     if SOCKS5_PROXY:
         try:
-            gost_proc = start_gost(SOCKS5_PROXY)
-            uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
-            print("🔗 代理检测正常，已启用中转。")
+            uc_proxy = f"http://{SOCKS5_PROXY}"
+            print(f"🔗 已启用代理中转: {uc_proxy}")
         except Exception as e:
-            print(f"⚠️ 代理启动失败：{e}，将尝试直连。")
+            print(f"⚠️ 代理配置异常：{e}，将尝试直连。")
 
     chromium_args = [
-        "--disable-heavy-ad-intervention",
-        "--disable-features=HeavyAdIntervention,HeavyAdInterventionWarning",
-        "--autoplay-policy=no-user-gesture-required",
-        "--window-size=1920,1080"
+        "--window-size=1920,1080",
+        "--lang=zh-CN,zh"
     ]
     driver = Driver(uc=True, headless=False, proxy=uc_proxy, chromium_arg=" ".join(chromium_args))
     success_runs = 0
@@ -557,7 +528,7 @@ def main():
                 success_runs += 1
                 print(f"  ✅ 第 {target_round} 轮闭环完成！", flush=True)
             else:
-                print(f"  ⚠️ 第 {target_round} 轮未能领奖，刷新重试...", flush=True)
+                print(f"  ⚠️ 第 {target_round} 轮未能领奖，稍作冷却后重试...", flush=True)
 
             time.sleep(6)
             driver.get(REWARDS_URL)
@@ -595,9 +566,6 @@ def main():
         )
     finally:
         driver.quit()
-        if gost_proc:
-            gost_proc.terminate()
-            print("gost 进程已终止。")
 
 
 if __name__ == "__main__":
