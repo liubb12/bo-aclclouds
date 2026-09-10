@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Freemchosting 自动赚积分脚本 (完整重构防误触版)
+# Freemchosting 自动赚积分脚本 (原生输入 + 严格强制过盾版)
 # ============================================================
 import os
 import re
@@ -16,7 +16,6 @@ from seleniumbase import Driver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 
-# 强制 Python 标准输出无缓冲，防止 GitHub Actions 日志被吞
 sys.stdout.reconfigure(line_buffering=True)
 
 LOGIN_URL = "https://dash.freemchosting.com/login"
@@ -128,26 +127,6 @@ def physical_click_trusted(driver, element):
         pass
 
 
-def safe_fill_input(driver, selector_xpath: str, value: str):
-    """安全填入输入框，兼顾 send_keys 与 JavaScript 响应式事件触发"""
-    try:
-        elems = driver.find_elements(By.XPATH, selector_xpath)
-        if not elems:
-            return
-        elem = elems[0]
-        elem.clear()
-        time.sleep(0.2)
-        elem.send_keys(value)
-        time.sleep(0.2)
-        driver.execute_script("""
-            arguments[0].value = arguments[1];
-            arguments[0].dispatchEvent(new Event('input', { bubbles: true }));
-            arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
-        """, elem, value)
-    except Exception as e:
-        print(f"  ⚠️ 输入框填入异常: {e}")
-
-
 def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bool:
     for xpath in xpaths:
         try:
@@ -187,8 +166,7 @@ def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bo
     return False
 
 
-def solve_turnstile_box(driver, max_wait_sec=25) -> bool:
-    """更严格的 Cloudflare Turnstile 处理逻辑，避免误伤无关元素"""
+def solve_turnstile_box(driver, max_wait_sec=30) -> bool:
     driver.switch_to.default_content()
     start = time.time()
     
@@ -205,7 +183,6 @@ def solve_turnstile_box(driver, max_wait_sec=25) -> bool:
             print("  ✅ Turnstile 验证已处于通过状态", flush=True)
             return True
 
-        # 仅针对特定的 Cloudflare 盾 iframe 内部进行点击
         try:
             cf_frames = driver.find_elements(By.XPATH, "//iframe[contains(@src, 'challenges.cloudflare.com') or contains(@id, 'cf-chl-widget')]")
             if cf_frames:
@@ -231,14 +208,23 @@ def login_freemc(driver):
     driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=6)
     time.sleep(5)
 
+    if not FREEMC_USER or not FREEMC_PASS:
+        raise ValueError("❌ GitHub Secrets 中的 FREEMC_USER 或 FREEMC_PASS 为空，请检查配置！")
+
     print("⌨️ 输入账号密码...", flush=True)
-    safe_fill_input(driver, "//input[@type='text' or @type='email' or @name='username']", FREEMC_USER)
+    driver.type("//input[@type='text' or @type='email' or @name='username']", FREEMC_USER)
     time.sleep(1)
-    safe_fill_input(driver, "//input[@type='password' or @name='password']", FREEMC_PASS)
+    driver.type("//input[@type='password' or @name='password']", FREEMC_PASS)
     time.sleep(1)
 
     print("🛡️ 处理登录页 Turnstile...", flush=True)
-    solve_turnstile_box(driver, max_wait_sec=20)
+    passed = solve_turnstile_box(driver, max_wait_sec=30)
+    
+    # 强制验证逻辑：如果 Turnstile 没有成功打勾，直接终止，拒绝盲目提交
+    if not passed:
+        driver.save_screenshot("turnstile_failed.png")
+        raise RuntimeError("❌ Turnstile 人机验证超时未通过，终止提交表单。")
+
     time.sleep(2)
 
     print("🚀 点击 Sign in 提交...", flush=True)
@@ -255,7 +241,7 @@ def login_freemc(driver):
 
     if not logged_in:
         driver.save_screenshot("login_failed.png")
-        raise RuntimeError(f"登录失败，停留在: {driver.current_url}")
+        raise RuntimeError(f"登录失败，可能密码错误或被拦截，停留在: {driver.current_url}")
 
     print(f"📍 登录成功，当前 URL: {driver.current_url}", flush=True)
 
