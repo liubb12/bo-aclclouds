@@ -2,7 +2,7 @@ name: VOER Host Auto Renew
 
 on:
   schedule:
-    - cron: '23 14 10 9 *'
+    - cron: '23 18 10 9 *'
   workflow_dispatch:
 
 jobs:
