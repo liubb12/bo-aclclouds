@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Freemchosting 自动赚积分脚本 (增强表单检测 + Cookie/密码双模版)
+# Freemchosting 自动赚积分脚本 (Cookie精确注入与免密直登版)
 # ============================================================
 import os
 import re
@@ -18,8 +18,10 @@ from selenium.webdriver.common.action_chains import ActionChains
 
 sys.stdout.reconfigure(line_buffering=True)
 
-LOGIN_URL = "https://dash.freemchosting.com/login"
-EARN_CREDITS_URL = "https://dash.freemchosting.com/free"
+BASE_URL = "https://dash.freemchosting.com"
+LOGIN_URL = f"{BASE_URL}/login"
+DASHBOARD_URL = f"{BASE_URL}/dashboard"
+EARN_CREDITS_URL = f"{BASE_URL}/free"
 
 LOCAL_HTTP_PORT = 18080
 FREEMC_USER = os.environ.get("FREEMC_USER", "").strip()
@@ -123,6 +125,44 @@ def physical_click_trusted(driver, element):
         pass
 
 
+def inject_cookies(driver, cookie_raw: str):
+    """精确注入 Cookie，针对 __Host- 前缀严格按照浏览器标准设置"""
+    print("🍪 正在解析并注入 Cookie...", flush=True)
+    items = [c.strip() for c in cookie_raw.split(";") if c.strip()]
+    success_count = 0
+    for item in items:
+        if "=" not in item:
+            continue
+        k, v = item.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+
+        cookie_dict = {
+            "name": k,
+            "value": v,
+            "path": "/"
+        }
+
+        # RFC 6265bis: __Host- 前缀必须启用 secure，且严禁设置 domain 属性
+        if k.startswith("__Host-"):
+            cookie_dict["secure"] = True
+        else:
+            cookie_dict["domain"] = "dash.freemchosting.com"
+
+        try:
+            driver.add_cookie(cookie_dict)
+            success_count += 1
+        except Exception:
+            try:
+                # 兼容性降级尝试
+                driver.add_cookie({"name": k, "value": v, "path": "/", "secure": True})
+                success_count += 1
+            except Exception as e:
+                print(f"  ⚠️ Cookie [{k}] 注入失败: {e}")
+
+    print(f"  ✅ 成功注入 {success_count} 项 Cookie 凭证", flush=True)
+
+
 def solve_turnstile_box(driver, max_wait_sec=30) -> bool:
     driver.switch_to.default_content()
     start = time.time()
@@ -134,7 +174,6 @@ def solve_turnstile_box(driver, max_wait_sec=30) -> bool:
 
     while time.time() - start < max_wait_sec:
         driver.switch_to.default_content()
-        # 检查 Turnstile 隐藏 response 字段是否已经填充
         has_token = driver.execute_script("""
             const el = document.querySelector('[name="cf-turnstile-response"]');
             return el && el.value && el.value.length > 10;
@@ -168,32 +207,34 @@ def solve_turnstile_box(driver, max_wait_sec=30) -> bool:
 
 
 def login_freemc(driver):
-    # 模式一：支持 Cookie 恢复登录
+    # 模式一：优先 Cookie 恢复登录
     if FREEMC_COOKIES:
-        print("🍪 尝试通过 Cookie 恢复会话...", flush=True)
-        driver.get("https://dash.freemchosting.com/robots.txt")
+        print("🔑 尝试通过 Cookie 恢复会话...", flush=True)
+        # 先以 UC 模式加载根域建立环境上下文
+        driver.uc_open_with_reconnect(f"{BASE_URL}/robots.txt", reconnect_time=4)
+        time.sleep(2)
+        
+        inject_cookies(driver, FREEMC_COOKIES)
         time.sleep(1)
-        for item in FREEMC_COOKIES.split(";"):
-            if "=" in item:
-                k, v = item.strip().split("=", 1)
-                try:
-                    driver.add_cookie({"name": k, "value": v, "domain": ".freemchosting.com", "path": "/"})
-                except Exception:
-                    pass
-        driver.get("https://dash.freemchosting.com/")
-        time.sleep(4)
-        if "/login" not in driver.current_url.lower():
-            print(f"  ✅ Cookie 登录生效，进入面板: {driver.current_url}")
-            return
-        print("  ⚠️ Cookie 已失效，回退至账号密码登录...")
 
-    # 模式二：账号密码 + 盾
+        print(f"🔄 导航至控制台主页: {DASHBOARD_URL} ...", flush=True)
+        driver.get(DASHBOARD_URL)
+        time.sleep(6)
+
+        # 校验是否已在控制台
+        body = driver.get_text("body")
+        if "/login" not in driver.current_url.lower() and ("Good to see you" in body or "credits" in body.lower() or "hosting" in body.lower()):
+            print(f"  ✅ Cookie 登录生效，已成功进入控制台！URL: {driver.current_url}")
+            return
+        print("  ⚠️ Cookie 已失效或未通过放行，回退至账号密码登录...")
+
+    # 模式二：账号密码 + Turnstile 回退
     print("🔑 访问登录页...", flush=True)
     driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=6)
     time.sleep(4)
 
     if not FREEMC_USER or not FREEMC_PASS:
-        raise ValueError("❌ FREEMC_USER 或 FREEMC_PASS 为空，请检查配置！")
+        raise ValueError("❌ FREEMC_COOKIES 失效且未配置 FREEMC_USER / FREEMC_PASS！")
 
     print("⌨️ 输入账号密码...", flush=True)
     driver.type("//input[@type='text' or @type='email' or @name='email' or @name='username']", FREEMC_USER)
@@ -206,7 +247,6 @@ def login_freemc(driver):
     time.sleep(2)
 
     print("🚀 提交登录表单...", flush=True)
-    # 优先查找 submit 按钮或执行表单 submit
     signin_btns = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(., 'Sign in') or contains(., 'Login')]")
     if signin_btns:
         physical_click_trusted(driver, signin_btns[0])
@@ -222,7 +262,6 @@ def login_freemc(driver):
 
     if not logged_in:
         driver.save_screenshot("login_failed.png")
-        # 抓取页面报错提示
         err_texts = []
         try:
             alerts = driver.find_elements(By.XPATH, "//*[contains(@class, 'alert') or contains(@class, 'error') or contains(@role, 'alert')]")
@@ -231,7 +270,7 @@ def login_freemc(driver):
                     err_texts.append(a.text.strip())
         except Exception:
             pass
-        err_detail = " | ".join(err_texts) if err_texts else "无明确错误提示（可能 Turnstile 校验被拒或密码错误）"
+        err_detail = " | ".join(err_texts) if err_texts else "无明确错误提示（密码错误或遭到人机防御拦截）"
         raise RuntimeError(f"登录失败，停留在: {driver.current_url}。原因: {err_detail}")
 
     print(f"📍 登录成功，当前 URL: {driver.current_url}", flush=True)
@@ -248,6 +287,10 @@ def parse_daily_limit_and_balance(driver) -> tuple:
         bm = re.search(r"([0-9]+\.[0-9]+)\s*credits", body_text, re.IGNORECASE)
         if bm:
             balance_str = bm.group(1)
+        else:
+            bm2 = re.search(r"([0-9]+\.[0-9]+)", body_text)
+            if bm2:
+                balance_str = bm2.group(1)
     except Exception:
         pass
     return current_count, balance_str
@@ -255,7 +298,7 @@ def parse_daily_limit_and_balance(driver) -> tuple:
 
 def run_single_task_loop(driver) -> bool:
     driver.get(EARN_CREDITS_URL)
-    time.sleep(4)
+    time.sleep(5)
 
     gen_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Generate reward') or contains(., 'Start reward')]")
     if not gen_btns:
@@ -389,7 +432,7 @@ def main():
     try:
         login_freemc(driver)
         driver.get(EARN_CREDITS_URL)
-        time.sleep(4)
+        time.sleep(5)
 
         current_count, balance_before = parse_daily_limit_and_balance(driver)
         print(f"📊 当前进度: {current_count}/15 | 目标: {DAILY_TARGET} | 余额: {balance_before}", flush=True)
@@ -401,7 +444,7 @@ def main():
                 success_runs += 1
                 time.sleep(5)
                 driver.get(EARN_CREDITS_URL)
-                time.sleep(3)
+                time.sleep(4)
                 current_count, _ = parse_daily_limit_and_balance(driver)
                 print(f"✅ 完成次数: {current_count}/{DAILY_TARGET}", flush=True)
             else:
@@ -420,7 +463,7 @@ def main():
             f"⏰ <b>执行时间：</b><code>{now}</code>",
             photo_path="freemc_final.png",
         )
-        print(f"\n🎯 达成目标，收工！")
+        print("\n🎯 达成目标，收工！")
 
     except Exception as e:
         err_msg = str(e)
