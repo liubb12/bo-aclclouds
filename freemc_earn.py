@@ -520,7 +520,8 @@ def main():
         current_count, balance_before = parse_daily_limit_and_balance(driver)
         print(f"📊 初始进度: {current_count}/15 | 计划轮数: {DAILY_TARGET} | 初始余额: {balance_before}", flush=True)
 
-        while current_count < 15 and success_runs < DAILY_TARGET:
+        # 核心修改：只根据 DAILY_TARGET 轮数限制执行，不受 15/15 总限额强行拦截
+        while success_runs < DAILY_TARGET:
             target_round = current_count + 1
             print(f"\n🚀 === 执行第 {target_round} 轮赚积分任务 ===", flush=True)
             ok = run_single_task_loop(driver, target_round)
