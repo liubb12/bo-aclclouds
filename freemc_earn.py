@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Freemchosting 自动赚积分脚本 (LootLabs 任务墙深度穿透修复版)
+# Freemchosting 自动赚积分脚本 (完美修复版：Cookie + HERE点击 + 强制5次)
 # ============================================================
 import os
 import re
@@ -201,8 +201,9 @@ def solve_turnstile_box(driver, max_wait_sec=30) -> bool:
 def login_freemc(driver):
     if FREEMC_COOKIES:
         print("🔑 尝试通过 Cookie 恢复会话...", flush=True)
-        driver.uc_open_with_reconnect(f"{BASE_URL}/robots.txt", reconnect_time=4)
-        time.sleep(2)
+        # 修复点 1：使用 BASE_URL 建立上下文，防止 invalid cookie domain 报错
+        driver.uc_open_with_reconnect(BASE_URL, reconnect_time=4)
+        time.sleep(3)
 
         inject_cookies(driver, FREEMC_COOKIES)
         time.sleep(1)
@@ -286,11 +287,29 @@ def parse_daily_limit_and_balance(driver) -> tuple:
 
 
 def wait_for_lootlabs_ready(driver, timeout=30) -> bool:
-    """循环等待 LootLabs 任务墙真正渲染出任务卡片"""
+    """循环等待 LootLabs 任务墙真正渲染出任务卡片，并处理 Packet blocked"""
     print("  ⏳ 等待 LootLabs 任务卡片 DOM 挂载渲染...", flush=True)
     start = time.time()
     while time.time() - start < timeout:
         body = driver.get_text("body")
+        
+        # 修复点 2：增加 Packet blocked 拦截的自动检测与 HERE 点击刷新
+        if "Packet blocked" in body or "HERE" in body:
+            print("  🚨 检测到 Packet blocked 软拦截，自动点击 [HERE] 刷新...", flush=True)
+            try:
+                here_els = driver.find_elements(By.XPATH, "//a[normalize-space(.)='HERE' or contains(., 'HERE')] | //u[contains(., 'HERE')] | //*[text()='HERE']")
+                if here_els:
+                    for h in here_els:
+                        if h.is_displayed():
+                            physical_click_trusted(driver, h)
+                            break
+                else:
+                    driver.execute_script("const a = Array.from(document.querySelectorAll('a, span, u')).find(el => el.textContent.trim() === 'HERE'); if(a) a.click();")
+            except Exception as e:
+                print(f"  ⚠️ 点击 HERE 异常: {e}")
+            time.sleep(3)
+            continue
+
         if "Complete Tasks to Continue" in body or "CONFIRM YOU ARE HUMAN" in body:
             print("  ✅ LootLabs 任务容器已就绪！", flush=True)
             return True
@@ -450,7 +469,7 @@ def run_single_task_loop(driver, round_num: int) -> bool:
         solve_turnstile_box(driver, max_wait_sec=25)
         time.sleep(2)
 
-        # 点击图 1 里的蓝色 Continue 按钮
+        # 点击蓝色 Continue 按钮
         continue_selectors = [
             "//button[normalize-space(.)='Continue' or text()='Continue']",
             "//button[contains(., 'Continue')]"
@@ -549,7 +568,8 @@ def main():
         current_count, balance_before = parse_daily_limit_and_balance(driver)
         print(f"📊 初始进度: {current_count}/15 | 计划轮数: {DAILY_TARGET} | 初始余额: {balance_before}", flush=True)
 
-        while current_count < 15 and success_runs < DAILY_TARGET:
+        # 修复点 3：确保每次只看设定的 5 个广告，不再受总额强制停止的干扰
+        while success_runs < DAILY_TARGET:
             target_round = current_count + 1
             print(f"\n🚀 === 执行第 {target_round} 轮赚积分任务 ===", flush=True)
             ok = run_single_task_loop(driver, target_round)
