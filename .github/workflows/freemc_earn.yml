@@ -1,9 +1,9 @@
 name: Run Freemchosting Earn Script
 
 on:
-  workflow_dispatch: # 支持手动触发测试
+  workflow_dispatch:
   schedule:
-    - cron: '30 2 * * *' # 每天 UTC 时间 02:30（北京时间 10:30）自动运行一次
+    - cron: '30 2 * * *'
 
 jobs:
   run-freemc:
@@ -19,6 +19,8 @@ jobs:
 
       - name: Install dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
           python -m pip install --upgrade pip
           pip install seleniumbase requests
 
@@ -29,4 +31,4 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          python freemc_earn.py
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python freemc_earn.py
