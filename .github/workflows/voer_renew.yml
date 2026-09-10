@@ -22,11 +22,15 @@ jobs:
 
       - name: Install Gost Proxy & Dependencies
         run: |
-          # 安装 gost 代理工具
-          wget -q https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20240125/gost_3.0.0-nightly.20240125_linux_amd64.tar.gz -O gost.tar.gz
-          tar -zxvf gost.tar.gz
-          sudo mv gost /usr/local/bin/
-          rm -f gost.tar.gz
+          # 安装 gost 官方发布版
+          curl -fL https://github.com/go-gost/gost/releases/download/v3.0.0/gost_3.0.0_linux_amd64.tar.gz -o gost.tar.gz || \
+          curl -fsSL https://pkg.gost.run/install.sh | bash || true
+
+          if [ -f gost.tar.gz ]; then
+            tar -zxvf gost.tar.gz
+            sudo mv gost /usr/local/bin/
+            rm -f gost.tar.gz
+          fi
 
           # 安装虚拟桌面及 Python 依赖
           sudo apt-get update
