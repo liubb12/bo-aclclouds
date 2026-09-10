@@ -75,6 +75,11 @@ jobs:
             git add "$WORKFLOW_FILE"
             COMMIT_MSG="下次执行时间：$(date -u -d "$NEXT_RUN_UTC" '+%Y年%m月%d日 %H:%M UTC')"
             git commit -m "$COMMIT_MSG" || echo "没有变更"
+            
+            # 清理工作区生成的日志和截图残留，防止 git pull 时产生冲突
+            git reset --hard HEAD
+            git clean -fd
+            
             git pull --rebase origin main
             git push origin main
             echo "✅ Cron 已自动更新并成功推送！"
