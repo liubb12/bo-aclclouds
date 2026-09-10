@@ -19,20 +19,39 @@ jobs:
 
       - name: Install dependencies & tools
         run: |
+          # 安装 gost 官方发布版
+          curl -fL https://github.com/go-gost/gost/releases/download/v3.0.0/gost_3.0.0_linux_amd64.tar.gz -o gost.tar.gz || \
+          curl -fsSL https://pkg.gost.run/install.sh | bash || true
+
+          if [ -f gost.tar.gz ]; then
+            tar -zxvf gost.tar.gz
+            sudo mv gost /usr/local/bin/
+            rm -f gost.tar.gz
+          fi
+
+          # 安装虚拟桌面及 Python 依赖
           sudo apt-get update
-          sudo apt-get install -y xvfb wget
-          wget -q https://github.com/go-gost/gost/releases/download/v3.0.0-rc10/gost_3.0.0-rc10_linux_amd64.tar.gz
-          tar -zxvf gost_3.0.0-rc10_linux_amd64.tar.gz
-          sudo mv gost /usr/local/bin/
+          sudo apt-get install -y xvfb
           python -m pip install --upgrade pip
-          pip install seleniumbase requests
+          pip install requests seleniumbase
+          sbase install chromedriver
 
       - name: Run Freemchosting Earn Script
         env:
+          FREEMC_COOKIES: ${{ secrets.FREEMC_COOKIES }}
           FREEMC_USER: ${{ secrets.FREEMC_USER }}
           FREEMC_PASS: ${{ secrets.FREEMC_PASS }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
         run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python freemc_earn.py
+          xvfb-run -a -s "-screen 0 1920x1080x24" python -u freemc_earn.py
+
+      - name: 上传排查截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: freemc-debug-screenshots
+          path: |
+            *.png
+          if-no-files-found: ignore
