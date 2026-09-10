@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动续期与离线开机脚本 (状态精准分流修复版)
+# VOER Host 自动续期与离线开机脚本 (显式状态提示 + 闭环版)
 # ============================================================
 import os
 import re
@@ -159,14 +159,34 @@ def restore_session_data(driver, credential_str: str, domain=".voer.host"):
 
 
 def get_expire_and_progress(driver) -> tuple:
+    """精准获取运行状态、倒计时和今日额度进度"""
     dismiss_pwa_popups(driver)
     raw_str = "未知"
     total_seconds = 0
     prog_str = "未知"
+    server_status = "未知"
 
     try:
         body_text = driver.get_text("body").replace("\u00a0", " ").replace("\u202f", " ")
 
+        # 1. 抓取顶部服务器状态 (RUNNING / STOPPED)
+        status_elems = driver.find_elements(
+            By.XPATH,
+            "//*[contains(@class, 'badge') or contains(@class, 'status') or self::span][translate(text(), 'running', 'RUNNING')='RUNNING' or translate(text(), 'stopped', 'STOPPED')='STOPPED']"
+        )
+        for se in status_elems:
+            txt = se.text.strip().upper()
+            if txt in ("RUNNING", "STOPPED"):
+                server_status = f"🟢 {txt}" if txt == "RUNNING" else f"🔴 {txt}"
+                break
+
+        if server_status == "未知":
+            if "RUNNING" in body_text:
+                server_status = "🟢 RUNNING"
+            elif "STOPPED" in body_text:
+                server_status = "🔴 STOPPED"
+
+        # 2. 抓取倒计时
         elems = driver.find_elements(By.XPATH, "//*[contains(text(), ':') and string-length(text()) <= 12]")
         for elem in elems:
             txt = elem.text.strip()
@@ -183,7 +203,10 @@ def get_expire_and_progress(driver) -> tuple:
                 p = t.split(":")
                 total_seconds = int(p[0]) * 3600 + int(p[1]) * 60 + int(p[2])
                 raw_str = f"剩余 {t}"
+            elif "STOPPED" in server_status:
+                raw_str = "离线待唤醒"
 
+        # 3. 抓取额度
         pm = re.search(r"Extensions\s*today[^\d]*(\d+\s*/\s*\d+)", body_text, re.IGNORECASE)
         if pm:
             prog_str = pm.group(1).replace(" ", "")
@@ -195,7 +218,8 @@ def get_expire_and_progress(driver) -> tuple:
     except Exception as e:
         print(f"⚠️ 提取状态异常: {e}")
 
-    return raw_str, total_seconds, prog_str
+    full_status_str = f"[{server_status}] {raw_str}"
+    return full_status_str, total_seconds, prog_str
 
 
 def physical_click_trusted(driver, element):
