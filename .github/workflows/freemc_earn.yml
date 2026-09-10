@@ -3,7 +3,7 @@ name: Run Freemchosting Earn Script
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 2 * * *'
+    - cron: '30 0 * * *'
 
 jobs:
   run-freemc:
