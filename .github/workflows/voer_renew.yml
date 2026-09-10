@@ -35,11 +35,14 @@ jobs:
         run: |
           sudo apt-get install -y xvfb
           python -m pip install --upgrade pip
-          pip install requests seleniumbase
-          sbase install chromedriver
+          pip install playwright requests
+          playwright install chromium
+          playwright install-deps
 
       - name: Run Renew Script
         env:
+          VOER_SERVER_ID: ${{ secrets.VOER_SERVER_ID }}
+          VOER_TOKEN: ${{ secrets.VOER_TOKEN }}
           VOER_COOKIES: ${{ secrets.VOER_COOKIES }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
@@ -80,14 +83,14 @@ jobs:
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add "$WORKFLOW_FILE"
             COMMIT_MSG="下次执行时间：$(date -u -d "$NEXT_RUN_UTC" '+%Y年%m月%d日 %H:%M UTC')"
-            git commit -m "$COMMIT_MSG" || echo "没有变更"
             
-            git reset --hard HEAD
-            git clean -fd
-            
-            git pull --rebase origin main
-            git push origin main
-            echo "✅ Cron 已自动更新并成功推送！"
+            if git commit -m "$COMMIT_MSG"; then
+              git pull --rebase origin main
+              git push origin main
+              echo "✅ Cron 已自动更新并成功推送！"
+            else
+              echo "没有变更需要提交"
+            fi
           else
             echo "未检测到 NEXT_RUN_UTC，跳过 cron 更新"
           fi
