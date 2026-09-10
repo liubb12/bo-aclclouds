@@ -1,241 +1,539 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Voer.host 免费服务器全自动开机脚本 (WARP 网络优化 + 离线广告唤醒版)
-优化点：放宽页面加载策略至 commit，延长网络握手超时至 60 秒，避免被第三方广告资源卡死
-"""
+# ============================================================
+# VOER Host 自动续期与离线开机脚本 (SeleniumBase 稳定兼容版)
+# ============================================================
 import os
-import sys
-import time
+import re
 import json
+import html
+import time
+import subprocess
 import requests
-import urllib.request
 from datetime import datetime, timezone, timedelta
-from playwright.sync_api import sync_playwright
+from seleniumbase import Driver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
+BASE_URL = "https://voer.host"
+SERVER_ID = os.environ.get("VOER_SERVER_ID", "84a3ea1a-c2b4-4798-ba20-a6b83a4d7992").strip()
+SERVER_CONSOLE_URL = f"{BASE_URL}/panel/server/{SERVER_ID}"
 
-SERVER_ID = os.environ.get("VOER_SERVER_ID", "").strip()
-TOKEN = os.environ.get("VOER_TOKEN", "").strip()
-if not TOKEN and os.environ.get("VOER_COOKIES"):
-    cookie_str = os.environ.get("VOER_COOKIES")
-    if "token=" in cookie_str:
-        TOKEN = cookie_str.split("token=")[1].split(";")[0].strip()
-
+LOCAL_HTTP_PORT = 18080
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
-
-CONFIG = {
-    "server_id": SERVER_ID,
-    "token": TOKEN,
-    "ads_per_extension": 3,
-    "ad_duration_sec": 33,
-}
+VOER_COOKIES = os.environ.get("VOER_COOKIES", "").strip()
+SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 
 
-def log(*args):
-    print(f"[{time.strftime('%H:%M:%S')}]", *args, flush=True)
-
-
-def tg_send(text: str):
+def tg_send(text: str, photo_path: str = None):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        print("⚠️ 未配置 TG_BOT_TOKEN / TG_CHAT_ID，跳过通知。")
         return
     try:
-        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=20)
+        if photo_path and os.path.exists(photo_path):
+            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
+            with open(photo_path, "rb") as f:
+                resp = requests.post(
+                    url,
+                    data={"chat_id": TG_CHAT_ID, "caption": text, "parse_mode": "HTML"},
+                    files={"photo": f},
+                    timeout=30,
+                )
+        else:
+            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+            resp = requests.post(
+                url,
+                data={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"},
+                timeout=30,
+            )
+        if resp.status_code == 200:
+            print("  ✅ TG 通知发送成功")
+        else:
+            print(f"  ⚠️ TG 通知发送失败: {resp.text}")
     except Exception as e:
-        log(f"TG 通知异常: {e}")
+        print(f"  ⚠️ TG 通知异常: {e}")
 
 
-def api_state(server_id: str, token: str) -> dict:
+def normalize_socks5_proxy(proxy_value: str) -> str:
+    proxy_value = (proxy_value or "").strip()
+    for prefix in ("socks5://", "socks://"):
+        if proxy_value.startswith(prefix):
+            proxy_value = proxy_value[len(prefix):]
+            break
+    if not proxy_value or ":" not in proxy_value:
+        raise ValueError("SOCKS5_PROXY 格式错误，应为 host:port 或 user:pass@host:port。")
+    return proxy_value
+
+
+def wait_http_proxy_ready(port: int, timeout: int = 15):
+    proxies = {"http": f"http://127.0.0.1:{port}", "https": f"http://127.0.0.1:{port}"}
+    last_error = None
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            resp = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=8)
+            if resp.ok:
+                print("  ✅ 本地 HTTP 代理连通性测试成功")
+                return
+        except Exception as e:
+            last_error = e
+        time.sleep(1)
+    raise RuntimeError(f"本地 HTTP 代理就绪检测失败: {last_error}")
+
+
+def start_gost(socks_proxy: str) -> subprocess.Popen:
+    normalized = normalize_socks5_proxy(socks_proxy)
+    cmd = ["gost", "-L", f"http://127.0.0.1:{LOCAL_HTTP_PORT}", "-F", f"socks5://{normalized}"]
+    print("  🚀 启动 gost 代理中转...")
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+    if proc.poll() is not None:
+        raise RuntimeError("gost 启动失败，请检查 SOCKS5_PROXY 格式和 gost 安装。")
+    wait_http_proxy_ready(LOCAL_HTTP_PORT)
+    print(f"  ✅ gost 已启动，本地代理端口：{LOCAL_HTTP_PORT}")
+    return proc
+
+
+def dismiss_pwa_popups(driver):
     try:
-        req = urllib.request.Request(
-            f"https://voer.host/api/servers/{server_id}",
-            headers={"Cookie": f"token={token}", "User-Agent": UA}
+        btns = driver.find_elements(
+            By.XPATH,
+            "//button[translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='close' "
+            "or contains(., 'Close') or contains(., 'Dismiss') or contains(., 'Accept')]"
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode()).get("server", {})
-    except Exception as e:
-        log(f"获取 API 状态失败: {e}")
-        return {}
+        for b in btns:
+            if b.is_displayed():
+                physical_click_trusted(driver, b)
+                time.sleep(0.5)
+    except Exception:
+        pass
 
 
-def click_frame_target(page, target_texts, timeout_ms=60000):
-    """递归穿透所有 iframe（包含 OOPIF）寻找指定文本并真实点击"""
-    deadline = time.time() + (timeout_ms / 1000)
-    while time.time() < deadline:
-        for frame in page.frames:
-            for text in target_texts:
-                for locator_fn in [
-                    lambda: frame.get_by_text(text, exact=False).first,
-                    lambda: frame.get_by_role("button", name=text).first
-                ]:
+def restore_session_data(driver, credential_str: str, domain=".voer.host"):
+    print("  📦 正在解析并恢复浏览器会话数据...", flush=True)
+    cookie_str = credential_str
+    storage_dict = {}
+    try:
+        data = json.loads(credential_str)
+        if isinstance(data, dict):
+            cookie_str = data.get("cookies", "")
+            storage_dict = data.get("storage", {})
+    except Exception:
+        pass
+
+    token_match = re.search(r"token=([^;\s]+)", cookie_str)
+    token_val = token_match.group(1).strip() if token_match else cookie_str.strip()
+
+    if cookie_str:
+        parts = [c.strip() for c in cookie_str.split(";") if c.strip()]
+        for part in parts:
+            if "=" in part:
+                name, val = part.split("=", 1)
+                try:
+                    driver.add_cookie({
+                        "name": name.strip(),
+                        "value": val.strip(),
+                        "domain": domain,
+                        "path": "/"
+                    })
+                except Exception:
                     try:
-                        loc = locator_fn()
-                        if loc.count() > 0 and loc.is_visible():
-                            loc.click(timeout=3000)
-                            return f"[{text}] in {frame.url[:40]}"
+                        driver.add_cookie({"name": name.strip(), "value": val.strip(), "path": "/"})
                     except Exception:
                         pass
-        time.sleep(1.5)
-    return None
+        print("  🍪 Cookie 注入完成", flush=True)
+
+    try:
+        driver.execute_script(f"""
+            localStorage.setItem('token', '{token_val}');
+            localStorage.setItem('auth_token', '{token_val}');
+            sessionStorage.setItem('token', '{token_val}');
+        """)
+        if storage_dict and isinstance(storage_dict, dict):
+            for k, v in storage_dict.items():
+                driver.execute_script("window.localStorage.setItem(arguments[0], arguments[1]);", k, str(v))
+        print("  💾 LocalStorage 恢复完成", flush=True)
+    except Exception as e:
+        print(f"  ⚠️ LocalStorage 注入异常: {e}")
 
 
-def trigger_start_modal(page):
-    """等待备份清理结束，点击 Start 或电源图标唤起广告弹窗"""
-    log("正在检测并唤醒服务器...")
+def get_expire_and_progress(driver) -> tuple:
+    dismiss_pwa_popups(driver)
+    raw_str = "未知"
+    total_seconds = 0
+    prog_str = "未知"
 
-    # 等待后台解冻
-    for _ in range(18):
-        try:
-            body = page.inner_text("body")
-            if "Saving your server" in body or "Start is locked" in body:
-                log("⏳ 节点正在备份/清理中，等待解冻...")
-                page.wait_for_timeout(10000)
-            else:
+    try:
+        body_text = driver.get_text("body").replace("\u00a0", " ").replace("\u202f", " ")
+
+        elems = driver.find_elements(By.XPATH, "//*[contains(text(), ':') and string-length(text()) <= 12]")
+        for elem in elems:
+            txt = elem.text.strip()
+            m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})$', txt)
+            if m:
+                total_seconds = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+                raw_str = f"剩余 {txt}"
                 break
+
+        if raw_str == "未知":
+            time_match = re.search(r'(?i)(?:Time Remaining|remaining|expire)[\s:]*([0-9]+:[0-9]+:[0-9]+)', body_text)
+            if time_match:
+                t = time_match.group(1).strip()
+                p = t.split(":")
+                total_seconds = int(p[0]) * 3600 + int(p[1]) * 60 + int(p[2])
+                raw_str = f"剩余 {t}"
+
+        pm = re.search(r"Extensions\s*today[^\d]*(\d+\s*/\s*\d+)", body_text, re.IGNORECASE)
+        if pm:
+            prog_str = pm.group(1).replace(" ", "")
+        else:
+            all_p = re.findall(r"(\d+\s*/\s*[1-9]\b)", body_text)
+            if all_p:
+                prog_str = all_p[0].replace(" ", "")
+
+    except Exception as e:
+        print(f"⚠️ 提取状态异常: {e}")
+
+    return raw_str, total_seconds, prog_str
+
+
+def physical_click_trusted(driver, element):
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", element)
+        time.sleep(0.1)
+    except Exception:
+        pass
+
+    try:
+        ActionChains(driver).move_to_element(element).pause(0.1).click().perform()
+        return
+    except Exception:
+        pass
+
+    try:
+        element.click()
+        return
+    except Exception:
+        pass
+
+    try:
+        driver.execute_script("""
+            const el = arguments[0];
+            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                el.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+            });
+        """, element)
+    except Exception:
+        pass
+
+
+def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bool:
+    for xpath in xpaths:
+        try:
+            elems = driver.find_elements(By.XPATH, xpath)
+            for el in elems:
+                if el.is_displayed():
+                    print(f"  👉 在深度 {current_depth} 击中目标: {xpath}...", flush=True)
+                    physical_click_trusted(driver, el)
+                    return True
         except Exception:
-            page.wait_for_timeout(3000)
+            pass
 
-    # 优先点击绿色的 Start 按钮
-    start_btn = page.locator("//button[contains(., 'Start') or contains(., '开始')]").first
-    if start_btn.is_visible():
-        log("发现 Start 按钮，点击唤起看广告弹窗...")
-        start_btn.click()
-        page.wait_for_timeout(4000)
-        return True
+    if current_depth >= max_depth:
+        return False
 
-    # 兜底点击电源中心图标
-    power_btn = page.locator("svg path[d*='M12 2v10']").first
-    if power_btn.is_visible():
-        log("点击电源中心图标唤醒...")
-        power_btn.click()
-        page.wait_for_timeout(4000)
-        return True
+    try:
+        sub_frames = driver.find_elements(By.TAG_NAME, "iframe")
+    except Exception:
+        sub_frames = []
+
+    for idx in range(len(sub_frames)):
+        try:
+            frames = driver.find_elements(By.TAG_NAME, "iframe")
+            if idx >= len(frames):
+                break
+            driver.switch_to.frame(frames[idx])
+            found = recursive_find_and_click(driver, xpaths, current_depth + 1, max_depth)
+            driver.switch_to.parent_frame()
+            if found:
+                return True
+        except Exception:
+            try:
+                driver.switch_to.parent_frame()
+            except Exception:
+                pass
 
     return False
 
 
-def save_next_cron(expires_at: str):
-    """解析到期时间写入日志文件"""
-    now = datetime.now(timezone.utc)
-    delay_sec = 14400
-    if expires_at:
-        try:
-            exp_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-            remaining = int((exp_dt - now).total_seconds())
-            if remaining > 0:
-                delay_sec = remaining + 120
-        except Exception:
-            pass
+def ensure_inside_ads_modal(driver):
+    """自适应状态检查：处理后台保存等待、离线唤醒以及运行中续期"""
+    driver.switch_to.default_content()
 
-    next_run = (now + timedelta(seconds=delay_sec)).strftime("%Y-%m-%d %H:%M:%S")
-    log(f"📌 计划下次启动/续期检查 (UTC): {next_run}")
+    # 1. 检查是否卡在关机保存
+    for _ in range(15):
+        body = driver.get_text("body")
+        if "Saving your server" in body or "Start is locked" in body:
+            print("  ⏳ 服务器正在后台保存世界并清理节点，等待解冻...", flush=True)
+            time.sleep(10)
+        else:
+            break
+
+    # 2. 如果已经弹出了看广告窗口，直接点里面的 Watch Ads
+    watch_ads_xpath = "//button[contains(., 'Watch Ads') or contains(., 'Watch ad')]"
+    confirm_btns = driver.find_elements(By.XPATH, watch_ads_xpath)
+    for b in confirm_btns:
+        if b.is_displayed() and "watch ads" in b.text.strip().lower():
+            print("  ℹ️ 处于对话框内，点击 [Watch Ads]...", flush=True)
+            physical_click_trusted(driver, b)
+            time.sleep(3)
+            return
+
+    # 3. 如果是 STOPPED 离线状态，点击绿色的 Start 按钮开机
+    start_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Start') or contains(., '开始')]")
+    if start_btns and start_btns[0].is_displayed():
+        print("  ℹ️ 服务器当前处于离线状态，点击 [Start] 唤醒看广告弹窗...", flush=True)
+        physical_click_trusted(driver, start_btns[0])
+        time.sleep(4)
+        return
+
+    # 4. 如果是 RUNNING 在线状态，点击 [+ Extend]
+    extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend')]")
+    if extend_btns and extend_btns[0].is_displayed():
+        print("  ℹ️ 页面检测到 [+ Extend]，点击触发续期...", flush=True)
+        physical_click_trusted(driver, extend_btns[0])
+        time.sleep(2)
+        c_btns = driver.find_elements(By.XPATH, watch_ads_xpath)
+        for b in c_btns:
+            if b.is_displayed():
+                physical_click_trusted(driver, b)
+                time.sleep(3)
+                break
+
+
+def click_watch_ad_everywhere(driver) -> bool:
+    xpaths = [
+        "//button[normalize-space(.)='Watch ad' or text()='Watch ad']",
+        "//button[contains(translate(., 'AD', 'ad'), 'watch ad')]",
+        "//div[contains(., 'Rewarded ad')]//button[contains(., 'Watch')]",
+        "//*[contains(text(), 'Ready for Voer')]"
+    ]
+    driver.switch_to.default_content()
+    return recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=3)
+
+
+def click_close_by_coordinates(driver) -> bool:
+    try:
+        driver.switch_to.default_content()
+        ad_card = driver.execute_script("""
+            const iframes = Array.from(document.querySelectorAll('iframe'));
+            for (let f of iframes) {
+                const rect = f.getBoundingClientRect();
+                if (rect.width > 250 && rect.height > 200 && rect.top > 50) {
+                    return f;
+                }
+            }
+            return null;
+        """)
+        if ad_card:
+            ActionChains(driver).move_to_element_with_offset(ad_card, int(ad_card.size['width'] / 2 - 10), -12).click().perform()
+            print("  🎯 执行右上角物理坐标打击！", flush=True)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def handle_sound_and_close_ad(driver, max_wait_sec=65) -> bool:
+    print("  ⏳ 正在监控广告生命周期...", flush=True)
+    start_time = time.time()
+
+    continue_xpaths = [
+        "//button[normalize-space(.)='Continue' or text()='Continue']",
+        "//*[text()='Continue' or contains(text(), 'Continue')]",
+        "//div[contains(text(), 'play with sound')]/following::button[contains(., 'Continue')]",
+        "//*[@id='continue-button']"
+    ]
+
+    close_xpaths = [
+        "//*[normalize-space(.)='Close' or text()='Close']",
+        "//*[translate(text(), 'CLOSE', 'close')='close']",
+        "//div[text()='Close' or contains(text(), 'Close')]",
+        "//span[text()='Close' or contains(text(), 'Close')]",
+        "//button[contains(., 'Close') or @aria-label='Close']",
+        "//div[@id='dismiss-button' or @aria-label='Close ad']",
+        "//*[@id='close-button']"
+    ]
+
+    has_sound_continued = False
+
+    while time.time() - start_time < max_wait_sec:
+        elapsed = time.time() - start_time
+
+        if not has_sound_continued and elapsed < 15:
+            driver.switch_to.default_content()
+            if recursive_find_and_click(driver, continue_xpaths, current_depth=0, max_depth=4):
+                print("  🎉 点击声音遮罩 [Continue] 成功！", flush=True)
+                has_sound_continued = True
+
+        if elapsed < 30:
+            time.sleep(2)
+            continue
+
+        driver.switch_to.default_content()
+        if recursive_find_and_click(driver, close_xpaths, current_depth=0, max_depth=4):
+            print("  🎯 成功命中并关闭广告 [Close]！", flush=True)
+            driver.switch_to.default_content()
+            time.sleep(3)
+            return True
+
+        if elapsed > 40:
+            if click_close_by_coordinates(driver):
+                time.sleep(2)
+                driver.switch_to.default_content()
+                return True
+
+        time.sleep(1.5)
+
+    driver.switch_to.default_content()
+    print("  ⚠️ 本轮广告展示结束", flush=True)
+    return False
+
+
+def save_next_cron_run(seconds_remaining: int, ext_prog: str):
+    now_utc = datetime.now(timezone.utc)
+    if seconds_remaining > 1200:
+        delay = seconds_remaining - 600
+    else:
+        delay = 14400
+
+    next_run = now_utc + timedelta(seconds=delay)
+    next_run_str = next_run.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"📌 下次执行时间 (UTC): {next_run_str}")
     with open("output.log", "a", encoding="utf-8") as f:
-        f.write(f"NEXT_RUN_UTC={next_run}\n")
+        f.write(f"NEXT_RUN_UTC={next_run_str}\n")
 
 
 def main():
-    if not CONFIG["token"] or not CONFIG["server_id"]:
-        log("❌ 缺少 VOER_TOKEN 或 VOER_SERVER_ID，请在 GitHub Secrets 中配置！")
-        sys.exit(1)
+    print("=== Python 任务初始化启动 ===", flush=True)
 
-    panel_url = f"https://voer.host/panel/server/{CONFIG['server_id']}"
-    completed_ads = 0
+    gost_proc = None
+    uc_proxy = None
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-setuid-sandbox"
-            ]
-        )
-        context = browser.new_context(viewport={"width": 1400, "height": 900})
-        context.add_cookies([{
-            "name": "token",
-            "value": CONFIG["token"],
-            "domain": "voer.host",
-            "path": "/",
-            "secure": True
-        }])
-
-        page = context.new_page()
-        page.set_default_timeout(60000)
-
-        log(f"访问面板: {panel_url}")
+    if SOCKS5_PROXY:
         try:
-            # wait_until='commit' 只要建立连接即放行，避免被 WARP 网络下的广告脚本卡死
-            page.goto(panel_url, wait_until="commit", timeout=60000)
+            gost_proc = start_gost(SOCKS5_PROXY)
+            uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
+            print("🔗 代理检测正常，已启用中转。")
         except Exception as e:
-            log(f"页面初次导航微超时，尝试继续执行: {e}")
+            print(f"⚠️ 代理启动失败：{e}，将尝试直连。")
 
-        # 给前端框架 10 秒时间完成 Vue/React 组件挂载
-        page.wait_for_timeout(10000)
+    chromium_args = [
+        "--disable-heavy-ad-intervention",
+        "--disable-features=HeavyAdIntervention,HeavyAdInterventionWarning",
+        "--autoplay-policy=no-user-gesture-required",
+        "--window-size=1920,1080"
+    ]
+    driver = Driver(uc=True, headless=False, proxy=uc_proxy, chromium_arg=" ".join(chromium_args))
 
-        init_state = api_state(CONFIG["server_id"], CONFIG["token"])
-        log(f"当前状态: {init_state.get('status')} | 到期时间: {init_state.get('sessionExpiresAt')}")
+    final_seconds = 0
+    final_prog = "未知"
 
-        # 触发激活广告弹窗
-        trigger_start_modal(page)
-        page.wait_for_timeout(5000)
+    try:
+        print("🔑 执行会话注入恢复...", flush=True)
+        driver.uc_open_with_reconnect(BASE_URL, reconnect_time=5)
+        time.sleep(2)
+        restore_session_data(driver, VOER_COOKIES)
+        time.sleep(1)
 
-        # 循环完成 3 轮广告
-        total_target = CONFIG["ads_per_extension"]
-        for round_idx in range(1, total_target + 1):
-            log(f"等待第 {round_idx}/{total_target} 个广告入口...")
-            hit = click_frame_target(
-                page,
-                ["Watch ad", "Watch Ads", "Rewarded ad", "Ready for Voer", "觀看廣告", "观看广告"],
-                timeout_ms=75000
-            )
+        print(f"🔄 打开服务器控制台: {SERVER_CONSOLE_URL} ...", flush=True)
+        driver.get(SERVER_CONSOLE_URL)
+        time.sleep(8)
+        dismiss_pwa_popups(driver)
 
-            if not hit:
-                log(f"⚠️ 第 {round_idx} 个广告未找到触发区域，退出广告轮询")
+        if "/login" in driver.current_url.lower():
+            print("❌ 会话已失效，请重新更新 VOER_COOKIES", flush=True)
+            return
+
+        expire_info_before, init_sec, init_prog = get_expire_and_progress(driver)
+        print(f"⏳ 初始服务器状态: {expire_info_before} | 今日进度: {init_prog}", flush=True)
+
+        completed = 0
+        for current_ad in range(1, 4):
+            print(f"\n🎬 === 正在准备第 {current_ad}/3 个广告 ===", flush=True)
+
+            ensure_inside_ads_modal(driver)
+
+            clicked = False
+            for sec in range(35):
+                ensure_inside_ads_modal(driver)
+                if click_watch_ad_everywhere(driver):
+                    print(f"  🎯 第 {sec + 1} 秒成功击发第 {current_ad} 轮的 [Watch ad] 按钮！", flush=True)
+                    clicked = True
+                    break
+                time.sleep(1)
+
+            if not clicked:
+                stuck_screenshot = f"stuck_round_{current_ad}.png"
+                driver.switch_to.default_content()
+                driver.save_screenshot(stuck_screenshot)
+                print(f"  ⚠️ 未能在模态框内等到第 {current_ad} 轮的 [Watch ad] 按钮", flush=True)
                 break
 
-            completed_ads += 1
-            log(f"✅ 成功点击广告 ({hit})，开始播放等待...")
-            page.wait_for_timeout(CONFIG["ad_duration_sec"] * 1000)
+            time.sleep(2)
+            closed_ok = handle_sound_and_close_ad(driver, max_wait_sec=65)
+            completed += 1
+            print(f"  ✅ 第 {current_ad} 个广告闭环完成！", flush=True)
+            time.sleep(3)
 
-            # 点击关闭广告
-            close_hit = click_frame_target(page, ["Close", "關閉", "关闭"], timeout_ms=45000)
-            log(f"广告关闭状态: {close_hit if close_hit else '无关闭按钮/自动结算'}")
-            page.wait_for_timeout(5000)
+        now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
-        # 轮询检验开机结果（等待 2 分钟）
-        log("广告播放完毕，等待节点分配与开机...")
-        final_state = init_state
-        is_success = False
-        wait_deadline = time.time() + 120
+        driver.switch_to.default_content()
+        final_close_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Close') or contains(., 'Done') or contains(., 'Finish')]")
+        for b in final_close_btns:
+            if b.is_displayed():
+                physical_click_trusted(driver, b)
+                time.sleep(1)
 
-        while time.time() < wait_deadline:
-            current_state = api_state(CONFIG["server_id"], CONFIG["token"])
-            if current_state:
-                final_state = current_state
-                if current_state.get("status") in ("running", "starting") or current_state.get("sessionExpiresAt") != init_state.get("sessionExpiresAt"):
-                    is_success = True
-                    log(f"🎉 启动成功！服务器状态: {current_state.get('status')}，到期时间: {current_state.get('sessionExpiresAt')}")
-                    break
-            time.sleep(8)
+        print("\n⏳ 3 轮广告流程完毕，等待后台分配并刷新...", flush=True)
+        time.sleep(10)
+        driver.switch_to.default_content()
+        driver.refresh()
+        time.sleep(8)
+        dismiss_pwa_popups(driver)
 
-        now_str = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
-        summary_title = "✅ 唤醒开机成功" if is_success else "⚠️ 流程执行完毕(请核对状态)"
+        expire_info_after, final_seconds, final_prog = get_expire_and_progress(driver)
+        driver.save_screenshot("final_success.png")
+
         tg_send(
-            f"📋 <b>VOER Host 自动开机汇报</b>\n\n"
-            f"🎯 <b>结果：</b>{summary_title}\n"
-            f"🎬 <b>广告进度：</b><code>{completed_ads}/{total_target}</code>\n"
-            f"⚡ <b>服务器状态：</b><code>{final_state.get('status')}</code>\n"
-            f"⏳ <b>到期时间：</b><code>{final_state.get('sessionExpiresAt')}</code>\n"
-            f"⏰ <b>执行时间：</b><code>{now_str}</code>"
+            f"📋 <b>VOER Host 自动续期汇总</b>\n\n"
+            f"🎬 <b>观看广告：</b><code>{completed}/3</code> 轮 (开机激活闭环)\n"
+            f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
+            f"📊 <b>今日进度：</b><code>{html.escape(final_prog)}</code>\n"
+            f"⏰ <b>执行时间：</b><code>{now}</code>",
+            photo_path="final_success.png",
         )
+        print(f"\n✅ 任务执行完毕，最新状态: {expire_info_after} | 额度: {final_prog}", flush=True)
 
-        save_next_cron(final_state.get("sessionExpiresAt"))
-        browser.close()
+    except Exception as e:
+        err_msg = str(e)
+        print(f"❌ 执行异常: {err_msg}", flush=True)
+        try:
+            driver.switch_to.default_content()
+            driver.save_screenshot("error.png")
+        except Exception:
+            pass
+        tg_send(
+            f"🔴 <b>VOER Host 续期通知</b>\n\n❌ <b>脚本执行异常</b>：\n<code>{html.escape(err_msg)}</code>",
+            photo_path="error.png",
+        )
+    finally:
+        driver.quit()
+        if gost_proc:
+            gost_proc.terminate()
+            print("gost 进程已终止。")
+        save_next_cron_run(final_seconds, final_prog)
 
 
 if __name__ == "__main__":
