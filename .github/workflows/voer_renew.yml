@@ -2,7 +2,7 @@ name: VOER Host Auto Renew
 
 on:
   schedule:
-    - cron: '40 5 10 9 *'
+    - cron: '48 19 9 9 *'
   workflow_dispatch:
 
 jobs:
@@ -20,13 +20,23 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Dependencies & Tools
+      - name: Install & Connect Cloudflare WARP
         run: |
+          # 官方源安装 WARP
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
           sudo apt-get update
-          sudo apt-get install -y xvfb wget
-          wget -q https://github.com/go-gost/gost/releases/download/v3.0.0-rc10/gost_3.0.0-rc10_linux_amd64.tar.gz
-          tar -zxvf gost_3.0.0-rc10_linux_amd64.tar.gz
-          sudo mv gost /usr/local/bin/
+          sudo apt-get install -y cloudflare-warp
+          # 静默注册并连接 WARP
+          warp-cli --accept-tos register
+          warp-cli --accept-tos connect
+          sleep 5
+          # 验证 WARP 状态
+          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep warp
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get install -y xvfb
           python -m pip install --upgrade pip
           pip install requests seleniumbase
           sbase install chromedriver
@@ -36,7 +46,7 @@ jobs:
           VOER_COOKIES: ${{ secrets.VOER_COOKIES }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
+          # 启用 WARP 后全局流量都会走 Cloudflare，无需再配置 SOCKS5_PROXY
         run: |
           touch output.log
           xvfb-run -a -s "-screen 0 1920x1080x24" python -u renew_voer.py 2>&1 | tee -a output.log
@@ -76,7 +86,6 @@ jobs:
             COMMIT_MSG="下次执行时间：$(date -u -d "$NEXT_RUN_UTC" '+%Y年%m月%d日 %H:%M UTC')"
             git commit -m "$COMMIT_MSG" || echo "没有变更"
             
-            # 清理工作区生成的日志和截图残留，防止 git pull 时产生冲突
             git reset --hard HEAD
             git clean -fd
             
