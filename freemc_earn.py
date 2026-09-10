@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Freemchosting 自动赚积分脚本 (Cookie精确注入与免密直登版)
+# Freemchosting 自动赚积分脚本 (自适应50s/180s Unlockr + Cookie直登版)
 # ============================================================
 import os
 import re
@@ -21,7 +21,8 @@ sys.stdout.reconfigure(line_buffering=True)
 BASE_URL = "https://dash.freemchosting.com"
 LOGIN_URL = f"{BASE_URL}/login"
 DASHBOARD_URL = f"{BASE_URL}/dashboard"
-EARN_CREDITS_URL = f"{BASE_URL}/free"
+# 积分中心的真实访问地址
+BILLING_FREE_URL = f"{BASE_URL}/billing?tab=free"
 
 LOCAL_HTTP_PORT = 18080
 FREEMC_USER = os.environ.get("FREEMC_USER", "").strip()
@@ -31,7 +32,8 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 
-DAILY_TARGET = 5
+# 每次执行自动刷取的奖励轮数（每天最多15轮）
+DAILY_TARGET = int(os.environ.get("DAILY_TARGET", "5"))
 
 
 def tg_send(text: str, photo_path: str = None):
@@ -126,7 +128,7 @@ def physical_click_trusted(driver, element):
 
 
 def inject_cookies(driver, cookie_raw: str):
-    """精确注入 Cookie，针对 __Host- 前缀严格按照浏览器标准设置"""
+    """精确注入 Cookie，严格遵守 __Host- 前缀标准"""
     print("🍪 正在解析并注入 Cookie...", flush=True)
     items = [c.strip() for c in cookie_raw.split(";") if c.strip()]
     success_count = 0
@@ -137,13 +139,7 @@ def inject_cookies(driver, cookie_raw: str):
         k = k.strip()
         v = v.strip()
 
-        cookie_dict = {
-            "name": k,
-            "value": v,
-            "path": "/"
-        }
-
-        # RFC 6265bis: __Host- 前缀必须启用 secure，且严禁设置 domain 属性
+        cookie_dict = {"name": k, "value": v, "path": "/"}
         if k.startswith("__Host-"):
             cookie_dict["secure"] = True
         else:
@@ -154,7 +150,6 @@ def inject_cookies(driver, cookie_raw: str):
             success_count += 1
         except Exception:
             try:
-                # 兼容性降级尝试
                 driver.add_cookie({"name": k, "value": v, "path": "/", "secure": True})
                 success_count += 1
             except Exception as e:
@@ -210,10 +205,9 @@ def login_freemc(driver):
     # 模式一：优先 Cookie 恢复登录
     if FREEMC_COOKIES:
         print("🔑 尝试通过 Cookie 恢复会话...", flush=True)
-        # 先以 UC 模式加载根域建立环境上下文
         driver.uc_open_with_reconnect(f"{BASE_URL}/robots.txt", reconnect_time=4)
         time.sleep(2)
-        
+
         inject_cookies(driver, FREEMC_COOKIES)
         time.sleep(1)
 
@@ -221,14 +215,13 @@ def login_freemc(driver):
         driver.get(DASHBOARD_URL)
         time.sleep(6)
 
-        # 校验是否已在控制台
         body = driver.get_text("body")
         if "/login" not in driver.current_url.lower() and ("Good to see you" in body or "credits" in body.lower() or "hosting" in body.lower()):
             print(f"  ✅ Cookie 登录生效，已成功进入控制台！URL: {driver.current_url}")
             return
-        print("  ⚠️ Cookie 已失效或未通过放行，回退至账号密码登录...")
+        print("  ⚠️ Cookie 已失效，回退至账号密码登录...")
 
-    # 模式二：账号密码 + Turnstile 回退
+    # 模式二：账号密码 + 盾
     print("🔑 访问登录页...", flush=True)
     driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=6)
     time.sleep(4)
@@ -270,90 +263,155 @@ def login_freemc(driver):
                     err_texts.append(a.text.strip())
         except Exception:
             pass
-        err_detail = " | ".join(err_texts) if err_texts else "无明确错误提示（密码错误或遭到人机防御拦截）"
+        err_detail = " | ".join(err_texts) if err_texts else "无明确错误提示（密码错误或人机拦截）"
         raise RuntimeError(f"登录失败，停留在: {driver.current_url}。原因: {err_detail}")
 
     print(f"📍 登录成功，当前 URL: {driver.current_url}", flush=True)
 
 
 def parse_daily_limit_and_balance(driver) -> tuple:
+    """提取当前进度 (例如 1/15) 以及积分余额 (例如 88.15)"""
     current_count = 0
     balance_str = "未知"
     try:
         body_text = driver.get_text("body")
+        # 匹配 0 / 15 或 1 / 15
         m = re.search(r"(\d+)\s*/\s*15", body_text)
         if m:
             current_count = int(m.group(1))
-        bm = re.search(r"([0-9]+\.[0-9]+)\s*credits", body_text, re.IGNORECASE)
+
+        bm = re.search(r"([0-9]+\.[0-9]+)\s*(?:COIN\s*)?credits", body_text, re.IGNORECASE)
         if bm:
             balance_str = bm.group(1)
         else:
             bm2 = re.search(r"([0-9]+\.[0-9]+)", body_text)
             if bm2:
                 balance_str = bm2.group(1)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  ⚠️ 提取余额状态异常: {e}")
     return current_count, balance_str
 
 
-def run_single_task_loop(driver) -> bool:
-    driver.get(EARN_CREDITS_URL)
-    time.sleep(5)
+def enter_reward_section(driver):
+    """确保进入具体的 Earn credits 任务页面"""
+    driver.get(BILLING_FREE_URL)
+    time.sleep(4)
 
-    gen_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Generate reward') or contains(., 'Start reward')]")
-    if not gen_btns:
-        print("⚠️ 未找到 Generate/Start 按钮")
-        return False
+    # 1. 如果还在概览页，点击 Earn credits 按钮进入具体任务卡片
+    earn_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Earn credits') or contains(., 'Open rewards')] | //a[contains(., 'Earn credits')]")
+    if earn_btns:
+        for b in earn_btns:
+            if b.is_displayed():
+                print("  👉 点击 [Earn credits] 进入任务中心...", flush=True)
+                physical_click_trusted(driver, b)
+                time.sleep(3)
+                break
+
+
+def run_single_task_loop(driver) -> bool:
+    """执行单个 Unlockr 广告任务闭环（自适应 50s / 180s 任务时长）"""
+    enter_reward_section(driver)
 
     main_tab = driver.current_window_handle
-    physical_click_trusted(driver, gen_btns[0])
-    time.sleep(3)
 
-    start_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Start reward')]")
-    if start_btns and start_btns[0].is_displayed():
-        physical_click_trusted(driver, start_btns[0])
-        time.sleep(4)
+    # 1. 查找并点击 Generate reward
+    gen_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Generate reward') or contains(., 'Start a reward')]")
+    if gen_btns and gen_btns[0].is_displayed():
+        print("  👉 点击 [Generate reward] 生成任务...", flush=True)
+        physical_click_trusted(driver, gen_btns[0])
+        time.sleep(3)
 
-    if len(driver.window_handles) > 1:
-        driver.switch_to.window(driver.window_handles[-1])
-    time.sleep(3)
+    # 2. 查找并点击 Start reward 唤醒外链
+    start_btn = None
+    for _ in range(15):
+        s_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Start reward')]")
+        for sb in s_btns:
+            if sb.is_displayed():
+                start_btn = sb
+                break
+        if start_btn:
+            break
+        time.sleep(1)
 
+    if not start_btn:
+        print("  ⚠️ 未能出现 [Start reward] 按钮", flush=True)
+        return False
+
+    print("  👉 点击 [Start reward]，打开广告任务外链...", flush=True)
+    physical_click_trusted(driver, start_btn)
+    time.sleep(5)
+
+    # 3. 切换到新弹出的外链标签页（Unlockr 任务墙）
+    handles_after_start = driver.window_handles
+    if len(handles_after_start) <= 1:
+        print("  ⚠️ 点击后未检测到新标签页弹出", flush=True)
+        return False
+
+    unlockr_tab = handles_after_start[-1]
+    driver.switch_to.window(unlockr_tab)
+    time.sleep(4)
+    print(f"  🌐 已切入 Unlockr 任务页: {driver.current_url}", flush=True)
+
+    # 4. 自适应解析任务时间（支持 50 秒短视频或 180 秒长文章）
+    wait_sec = 50
     try:
         body_text = driver.get_text("body")
         sec_m = re.search(r"~(\d+)\s*sec", body_text)
-        wait_sec = int(sec_m.group(1)) if sec_m else 50
-        print(f"  ⏱️ 任务要求等待: {wait_sec} 秒", flush=True)
+        if sec_m:
+            wait_sec = int(sec_m.group(1))
+            print(f"  ⏱️ 动态识别到任务时长：~{wait_sec} 秒", flush=True)
+        else:
+            print("  ℹ️ 未检测到具体秒数，采用基准等待 60 秒", flush=True)
+            wait_sec = 60
 
+        # 点击第一项（阅读文章/观看视频）右侧的箭头 ➔
         task1_arrow_xpaths = [
             "(//div[contains(., 'Complete Tasks to Continue')]/following::button[.//svg])[1]",
+            "(//div[contains(., 'Complete Tasks to Continue')]//button)[1]",
             "(//button[.//svg or contains(@class, 'arrow')])[1]"
         ]
+        arrow1_clicked = False
         for xp in task1_arrow_xpaths:
             els = driver.find_elements(By.XPATH, xp)
             if els and els[0].is_displayed():
+                print("  👉 点击任务 1 箭头 ➔，唤起广告页面...", flush=True)
                 physical_click_trusted(driver, els[0])
+                arrow1_clicked = True
                 break
+
+        if not arrow1_clicked:
+            print("  ⚠️ 未能点击到任务 1 箭头，尝试全局模糊搜索并点击")
+            driver.execute_script("const btns = document.querySelectorAll('button'); if(btns.length>0) btns[0].click();")
+
         time.sleep(3)
 
+        # 4.1 如果点击后又弹出了广告第三层标签页，切过去挂机再关闭
         if len(driver.window_handles) > 2:
-            driver.switch_to.window(driver.window_handles[-1])
-            print(f"  ⏳ 外链标签页等待 {wait_sec + 5} 秒...", flush=True)
-            time.sleep(wait_sec + 5)
-            driver.close()
-            driver.switch_to.window(driver.window_handles[-1])
+            ad_tab = driver.window_handles[-1]
+            driver.switch_to.window(ad_tab)
+            print(f"  ⏳ 已切入广告挂机标签页，等待倒计时 {wait_sec + 15} 秒...", flush=True)
+            time.sleep(wait_sec + 15)
+            try:
+                driver.close()
+            except Exception:
+                pass
+            driver.switch_to.window(unlockr_tab)
         else:
-            print(f"  ⏳ 原地等待 {wait_sec + 5} 秒...", flush=True)
-            time.sleep(wait_sec + 5)
+            print(f"  ⏳ 原标签页就地挂机等待倒计时 {wait_sec + 15} 秒...", flush=True)
+            time.sleep(wait_sec + 15)
+
     except Exception as e:
-        print(f"  ⚠️ 任务 1 提示: {e}")
+        print(f"  ⚠️ 处理任务 1 挂机阶段提示: {e}", flush=True)
 
     time.sleep(3)
-    driver.switch_to.default_content()
+    driver.switch_to.window(unlockr_tab)
 
+    # 5. 处理任务 2：CONFIRM YOU ARE HUMAN (Turnstile 验证)
     try:
-        print("🛡️ 处理任务人机验证...", flush=True)
+        print("🛡️ 正在寻找并点击 [CONFIRM YOU ARE HUMAN] 验证...", flush=True)
         human_xpaths = [
             "//*[contains(text(), 'CONFIRM YOU ARE HUMAN') or contains(text(), 'Confirm you are human')]",
+            "(//div[contains(., 'Complete Tasks to Continue')]/following::button[.//svg])[2]",
             "(//button[.//svg or contains(@class, 'arrow')])[2]"
         ]
         for xp in human_xpaths:
@@ -363,37 +421,60 @@ def run_single_task_loop(driver) -> bool:
                 break
         time.sleep(3)
 
+        print("  🛡️ 尝试通过任务页 Turnstile 验证框...", flush=True)
         solve_turnstile_box(driver, max_wait_sec=25)
+        time.sleep(2)
 
-        continue_xpaths = ["//button[normalize-space(.)='Continue' or text()='Continue']"]
+        # 点击确认后的 Continue 按钮
+        continue_xpaths = [
+            "//button[normalize-space(.)='Continue' or text()='Continue']",
+            "//button[contains(., 'Continue')]"
+        ]
         for _ in range(8):
+            clicked_c = False
             for xp in continue_xpaths:
                 els = driver.find_elements(By.XPATH, xp)
                 if els and els[0].is_displayed():
                     physical_click_trusted(driver, els[0])
-                    print("  ✅ 已点击 Continue")
+                    print("  ✅ 已成功点击 [Continue] 按钮", flush=True)
+                    clicked_c = True
                     break
-            time.sleep(2)
+            if clicked_c:
+                break
+            time.sleep(1.5)
     except Exception as e:
-        print(f"  ⚠️ 任务 2 提示: {e}")
+        print(f"  ⚠️ 处理任务 2 人机验证提示: {e}", flush=True)
 
     time.sleep(3)
-    driver.switch_to.default_content()
+    driver.switch_to.window(unlockr_tab)
 
+    # 6. 最终点击 CLAIM REWARD
+    claim_success = False
     try:
-        claim_xpaths = ["//button[contains(., 'CLAIM REWARD') or contains(., 'Claim')]"]
-        for _ in range(8):
+        print("🎁 等待 [CLAIM REWARD] 按钮解锁生效...", flush=True)
+        claim_xpaths = [
+            "//button[contains(., 'CLAIM REWARD') or contains(., 'Claim reward') or contains(., 'Claim')]"
+        ]
+        for _ in range(15):
             for xp in claim_xpaths:
                 els = driver.find_elements(By.XPATH, xp)
-                if els and els[0].is_displayed():
-                    physical_click_trusted(driver, els[0])
-                    print("  🎉 已点击 CLAIM REWARD！")
-                    time.sleep(6)
+                for el in els:
+                    # 检查是否处于已启用状态（非 disabled）
+                    if el.is_displayed() and not el.get_attribute("disabled"):
+                        physical_click_trusted(driver, el)
+                        print("  🎉 成功击发 [CLAIM REWARD]！", flush=True)
+                        claim_success = True
+                        time.sleep(6)
+                        break
+                if claim_success:
                     break
+            if claim_success:
+                break
             time.sleep(2)
     except Exception as e:
-        print(f"  ⚠️ 领奖提示: {e}")
+        print(f"  ⚠️ 点击领取奖励异常: {e}", flush=True)
 
+    # 7. 清理关闭除主面板外的所有附属标签页
     try:
         for handle in driver.window_handles:
             if handle != main_tab:
@@ -403,7 +484,7 @@ def run_single_task_loop(driver) -> bool:
     except Exception:
         pass
 
-    return True
+    return claim_success
 
 
 def main():
@@ -431,26 +512,28 @@ def main():
 
     try:
         login_freemc(driver)
-        driver.get(EARN_CREDITS_URL)
-        time.sleep(5)
+        enter_reward_section(driver)
+        time.sleep(4)
 
         current_count, balance_before = parse_daily_limit_and_balance(driver)
-        print(f"📊 当前进度: {current_count}/15 | 目标: {DAILY_TARGET} | 余额: {balance_before}", flush=True)
+        print(f"📊 当前进度: {current_count}/15 | 本次目标轮数: {DAILY_TARGET} | 初始余额: {balance_before}", flush=True)
 
-        while current_count < DAILY_TARGET and success_runs < DAILY_TARGET:
-            print(f"\n🚀 执行第 {current_count + 1} 轮...", flush=True)
+        while current_count < 15 and success_runs < DAILY_TARGET:
+            print(f"\n🚀 === 执行第 {current_count + 1} 轮赚积分任务 ===", flush=True)
             ok = run_single_task_loop(driver)
             if ok:
                 success_runs += 1
-                time.sleep(5)
-                driver.get(EARN_CREDITS_URL)
-                time.sleep(4)
-                current_count, _ = parse_daily_limit_and_balance(driver)
-                print(f"✅ 完成次数: {current_count}/{DAILY_TARGET}", flush=True)
+                print(f"  ✅ 第 {current_count + 1} 轮闭环完成！", flush=True)
             else:
-                time.sleep(5)
+                print(f"  ⚠️ 第 {current_count + 1} 轮未能正常领奖，稍作冷却后重试...", flush=True)
 
-        driver.get(EARN_CREDITS_URL)
+            time.sleep(5)
+            enter_reward_section(driver)
+            time.sleep(3)
+            current_count, _ = parse_daily_limit_and_balance(driver)
+            print(f"  📈 最新当日累计进度: {current_count}/15", flush=True)
+
+        enter_reward_section(driver)
         time.sleep(4)
         _, balance_after = parse_daily_limit_and_balance(driver)
         driver.save_screenshot("freemc_final.png")
@@ -463,7 +546,7 @@ def main():
             f"⏰ <b>执行时间：</b><code>{now}</code>",
             photo_path="freemc_final.png",
         )
-        print("\n🎯 达成目标，收工！")
+        print("\n🎯 任务执行完毕，收工！")
 
     except Exception as e:
         err_msg = str(e)
