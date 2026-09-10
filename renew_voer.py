@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动续期与离线开机脚本 (SeleniumBase 稳定兼容版)
+# VOER Host 自动续期与离线开机脚本 (状态精准分流修复版)
 # ============================================================
 import os
 import re
@@ -268,10 +268,10 @@ def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bo
 
 
 def ensure_inside_ads_modal(driver):
-    """自适应状态检查：处理后台保存等待、离线唤醒以及运行中续期"""
+    """自适应状态检查：优先处理在线续期，其次处理未禁用的离线开机"""
     driver.switch_to.default_content()
 
-    # 1. 检查是否卡在关机保存
+    # 1. 检查是否卡在关机备份解冻期
     for _ in range(15):
         body = driver.get_text("body")
         if "Saving your server" in body or "Start is locked" in body:
@@ -290,18 +290,10 @@ def ensure_inside_ads_modal(driver):
             time.sleep(3)
             return
 
-    # 3. 如果是 STOPPED 离线状态，点击绿色的 Start 按钮开机
-    start_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Start') or contains(., '开始')]")
-    if start_btns and start_btns[0].is_displayed():
-        print("  ℹ️ 服务器当前处于离线状态，点击 [Start] 唤醒看广告弹窗...", flush=True)
-        physical_click_trusted(driver, start_btns[0])
-        time.sleep(4)
-        return
-
-    # 4. 如果是 RUNNING 在线状态，点击 [+ Extend]
-    extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend')]")
+    # 3. 【开机状态优先】检查是否有 [+ Extend] 按钮
+    extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend') and not(@disabled)]")
     if extend_btns and extend_btns[0].is_displayed():
-        print("  ℹ️ 页面检测到 [+ Extend]，点击触发续期...", flush=True)
+        print("  ℹ️ 服务器运行中，点击 [+ Extend] 触发续期...", flush=True)
         physical_click_trusted(driver, extend_btns[0])
         time.sleep(2)
         c_btns = driver.find_elements(By.XPATH, watch_ads_xpath)
@@ -310,6 +302,15 @@ def ensure_inside_ads_modal(driver):
                 physical_click_trusted(driver, b)
                 time.sleep(3)
                 break
+        return
+
+    # 4. 【离线状态判定】仅在 Start 未被禁用的情况下才点击
+    start_btns = driver.find_elements(By.XPATH, "//button[(contains(., 'Start') or contains(., '开始')) and not(@disabled)]")
+    if start_btns and start_btns[0].is_displayed():
+        print("  ℹ️ 服务器离线且可启动，点击 [Start] 唤醒看广告弹窗...", flush=True)
+        physical_click_trusted(driver, start_btns[0])
+        time.sleep(4)
+        return
 
 
 def click_watch_ad_everywhere(driver) -> bool:
@@ -508,7 +509,7 @@ def main():
 
         tg_send(
             f"📋 <b>VOER Host 自动续期汇总</b>\n\n"
-            f"🎬 <b>观看广告：</b><code>{completed}/3</code> 轮 (开机激活闭环)\n"
+            f"🎬 <b>观看广告：</b><code>{completed}/3</code> 轮\n"
             f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
             f"📊 <b>今日进度：</b><code>{html.escape(final_prog)}</code>\n"
             f"⏰ <b>执行时间：</b><code>{now}</code>",
