@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动续期与离线开机脚本 (击穿弹窗 + 崩溃恢复兼容版)
+# VOER Host 自动续期与离线开机脚本 (中英双语 + 弹窗强杀 + 崩溃恢复版)
 # ============================================================
 import os
 import re
@@ -127,16 +127,16 @@ def physical_click_trusted(driver, element):
 
 def dismiss_unlock_modal(driver):
     """
-    专门对付网页中间弹出的 "Unlock more content -> View a short ad" 的全屏遮罩
+    专门对付网页中间弹出的 "Unlock more content -> View a short ad" 的全屏遮罩 (中英双语兼容)
     """
     print("  🔎 扫描 Unlock 拦截弹窗...", flush=True)
     driver.switch_to.default_content()
     
     unlock_xpaths = [
-        "//button[contains(., 'View a short ad')]",
-        "//div[contains(text(), 'Unlock more content')]/following::button[contains(., 'View a short')]",
-        "//*[contains(text(), 'Site-wide access')]/ancestor::button",
-        "//*[contains(text(), 'View a short ad')]"
+        "//button[contains(., 'View a short ad') or contains(., '观看一则短广告')]",
+        "//div[contains(text(), 'Unlock more content') or contains(text(), '解锁更多内容')]/following::button[contains(., 'View a short') or contains(., '观看一则短广告')]",
+        "//*[contains(text(), 'Site-wide access') or contains(text(), '网站级访问权限')]/ancestor::button",
+        "//*[contains(text(), 'View a short ad') or contains(text(), '观看一则短广告')]"
     ]
     
     clicked = False
@@ -148,7 +148,7 @@ def dismiss_unlock_modal(driver):
                     if el.is_displayed():
                         print("  🚨 检测到 Unlock 全局拦截弹窗，准备击穿...", flush=True)
                         physical_click_trusted(driver, el)
-                        print("  💥 已成功点击 [View a short ad] 按钮！", flush=True)
+                        print("  💥 已成功点击 [View a short ad / 观看一则短广告] 按钮！", flush=True)
                         time.sleep(4)
                         clicked = True
                         break
@@ -381,8 +381,8 @@ def ensure_inside_ads_modal(driver):
                 break
         return
 
-    # 4. 【离线/崩溃状态判定】支持 Start 和 Recover 按钮
-    start_btns = driver.find_elements(By.XPATH, "//button[(contains(., 'Start') or contains(., '开始') or contains(., 'Recover')) and not(@disabled)]")
+    # 4. 【离线/崩溃状态判定】支持 Start 和 Recover (中英双语)
+    start_btns = driver.find_elements(By.XPATH, "//button[(contains(., 'Start') or contains(., '开始') or contains(., 'Recover') or contains(., '恢复')) and not(@disabled)]")
     if start_btns and start_btns[0].is_displayed():
         btn_text = start_btns[0].text.strip()
         print(f"  ℹ️ 服务器处于脱机状态，点击 [{btn_text}] 唤醒看广告弹窗...", flush=True)
@@ -577,8 +577,8 @@ def main():
                 physical_click_trusted(driver, b)
                 time.sleep(1)
 
-        print("\n⏳ 4 轮广告流程完毕，等待后台分配并刷新...", flush=True)
-        time.sleep(10)
+        print("\n⏳ 4 轮广告流程完毕，等待后台分配并刷新，稍候 30 秒以确保状态同步...", flush=True)
+        time.sleep(30)
         driver.switch_to.default_content()
         driver.refresh()
         time.sleep(8)
