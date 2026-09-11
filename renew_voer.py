@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 自动续期与离线开机脚本 (击穿全屏拦截版)
+# VOER Host 自动续期与离线开机脚本 (击穿弹窗 + 崩溃恢复兼容版)
 # ============================================================
 import os
 import re
@@ -132,7 +132,6 @@ def dismiss_unlock_modal(driver):
     print("  🔎 扫描 Unlock 拦截弹窗...", flush=True)
     driver.switch_to.default_content()
     
-    # 该弹窗内的特征文本对应的按钮
     unlock_xpaths = [
         "//button[contains(., 'View a short ad')]",
         "//div[contains(text(), 'Unlock more content')]/following::button[contains(., 'View a short')]",
@@ -236,20 +235,22 @@ def get_expire_and_progress(driver) -> tuple:
     try:
         body_text = driver.get_text("body").replace("\u00a0", " ").replace("\u202f", " ")
 
-        # 1. 抓取顶部服务器状态 (RUNNING / STOPPED / RESTORING)
+        # 1. 抓取顶部服务器状态 (兼容 CRASHED 崩溃状态)
         status_elems = driver.find_elements(
             By.XPATH,
-            "//*[contains(@class, 'badge') or contains(@class, 'status') or self::span][translate(text(), 'running', 'RUNNING')='RUNNING' or translate(text(), 'stopped', 'STOPPED')='STOPPED' or translate(text(), 'restoring', 'RESTORING')='RESTORING']"
+            "//*[contains(@class, 'badge') or contains(@class, 'status') or self::span][translate(text(), 'running', 'RUNNING')='RUNNING' or translate(text(), 'stopped', 'STOPPED')='STOPPED' or translate(text(), 'restoring', 'RESTORING')='RESTORING' or translate(text(), 'crashed', 'CRASHED')='CRASHED']"
         )
         for se in status_elems:
             txt = se.text.strip().upper()
-            if txt in ("RUNNING", "STOPPED", "RESTORING"):
+            if txt in ("RUNNING", "STOPPED", "RESTORING", "CRASHED"):
                 if txt == "RUNNING":
                     server_status = "🟢 RUNNING"
                 elif txt == "STOPPED":
                     server_status = "🔴 STOPPED"
-                else:
+                elif txt == "RESTORING":
                     server_status = "🟠 RESTORING"
+                else:
+                    server_status = "💥 CRASHED"
                 break
 
         if server_status == "未知":
@@ -259,6 +260,8 @@ def get_expire_and_progress(driver) -> tuple:
                 server_status = "🔴 STOPPED"
             elif "RESTORING" in body_text:
                 server_status = "🟠 RESTORING"
+            elif "CRASHED" in body_text:
+                server_status = "💥 CRASHED"
 
         # 2. 抓取倒计时
         elems = driver.find_elements(By.XPATH, "//*[contains(text(), ':') and string-length(text()) <= 12]")
@@ -281,6 +284,8 @@ def get_expire_and_progress(driver) -> tuple:
                 raw_str = "离线待唤醒"
             elif "RESTORING" in server_status:
                 raw_str = "系统恢复中"
+            elif "CRASHED" in server_status:
+                raw_str = "运行崩溃待恢复"
 
         # 3. 抓取额度
         pm = re.search(r"Extensions\s*today[^\d]*(\d+\s*/\s*\d+)", body_text, re.IGNORECASE)
@@ -338,10 +343,9 @@ def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bo
 
 
 def ensure_inside_ads_modal(driver):
-    """自适应状态检查：清除拦截 -> 检查是否卡关机 -> 点击续期/开机 -> 点 Watch Ads"""
+    """自适应状态检查：清除拦截 -> 检查是否卡关机 -> 点击续期/开机(恢复) -> 点 Watch Ads"""
     driver.switch_to.default_content()
 
-    # ★ 核心修复：每次准备动作前，先扫荡一次全屏拦截弹窗！
     dismiss_unlock_modal(driver)
 
     # 1. 检查是否卡在关机备份解冻期 (Restoring/Saving)
@@ -377,14 +381,14 @@ def ensure_inside_ads_modal(driver):
                 break
         return
 
-    # 4. 【离线状态判定】仅在 Start 未被禁用的情况下才点击
-    start_btns = driver.find_elements(By.XPATH, "//button[(contains(., 'Start') or contains(., '开始')) and not(@disabled)]")
+    # 4. 【离线/崩溃状态判定】支持 Start 和 Recover 按钮
+    start_btns = driver.find_elements(By.XPATH, "//button[(contains(., 'Start') or contains(., '开始') or contains(., 'Recover')) and not(@disabled)]")
     if start_btns and start_btns[0].is_displayed():
-        print("  ℹ️ 服务器离线且可启动，点击 [Start] 唤醒看广告弹窗...", flush=True)
+        btn_text = start_btns[0].text.strip()
+        print(f"  ℹ️ 服务器处于脱机状态，点击 [{btn_text}] 唤醒看广告弹窗...", flush=True)
         physical_click_trusted(driver, start_btns[0])
         time.sleep(4)
         
-        # 点完 Start 后，很可能会被再次拦截，再扫一次
         dismiss_unlock_modal(driver)
         return
 
@@ -537,8 +541,8 @@ def main():
         print(f"⏳ 初始服务器状态: {expire_info_before} | 今日进度: {init_prog}", flush=True)
 
         completed = 0
-        for current_ad in range(1, 4):
-            print(f"\n🎬 === 正在准备第 {current_ad}/3 个广告 ===", flush=True)
+        for current_ad in range(1, 5):
+            print(f"\n🎬 === 正在准备第 {current_ad}/4 个广告 ===", flush=True)
 
             ensure_inside_ads_modal(driver)
 
@@ -573,19 +577,22 @@ def main():
                 physical_click_trusted(driver, b)
                 time.sleep(1)
 
-        print("\n⏳ 3 轮广告流程完毕，等待后台分配并刷新...", flush=True)
+        print("\n⏳ 4 轮广告流程完毕，等待后台分配并刷新...", flush=True)
         time.sleep(10)
         driver.switch_to.default_content()
         driver.refresh()
         time.sleep(8)
+        
+        # 结尾截图前，再强行清理一次弹窗
         dismiss_pwa_popups(driver)
+        dismiss_unlock_modal(driver)
 
         expire_info_after, final_seconds, final_prog = get_expire_and_progress(driver)
         driver.save_screenshot("final_success.png")
 
         tg_send(
             f"📋 <b>VOER Host 自动续期汇总</b>\n\n"
-            f"🎬 <b>观看广告：</b><code>{completed}/3</code> 轮\n"
+            f"🎬 <b>观看广告：</b><code>{completed}/4</code> 轮\n"
             f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
             f"📊 <b>今日进度：</b><code>{html.escape(final_prog)}</code>\n"
             f"⏰ <b>执行时间：</b><code>{now}</code>",
