@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Freemchosting 自动赚积分脚本 (完美修复版：Cookie + HERE点击 + 强制5次)
+# Freemchosting 自动赚积分脚本 (完美修复版：Cookie + HERE点击 + 强制5次 + 进度解析)
 # ============================================================
 import os
 import re
@@ -201,7 +201,6 @@ def solve_turnstile_box(driver, max_wait_sec=30) -> bool:
 def login_freemc(driver):
     if FREEMC_COOKIES:
         print("🔑 尝试通过 Cookie 恢复会话...", flush=True)
-        # 修复点 1：使用 BASE_URL 建立上下文，防止 invalid cookie domain 报错
         driver.uc_open_with_reconnect(BASE_URL, reconnect_time=4)
         time.sleep(3)
 
@@ -269,31 +268,37 @@ def parse_daily_limit_and_balance(driver) -> tuple:
     current_count = 0
     balance_str = "未知"
     try:
-        body_text = driver.get_text("body")
-        m = re.search(r"(\d+)\s*/\s*15", body_text)
+        limit_text = ""
+        try:
+            limit_elem = driver.find_element(By.XPATH, "//*[contains(text(), 'DAILY LIMIT')]/ancestor::div[contains(@class, 'rounded') or contains(@class, 'card')]")
+            limit_text = limit_elem.text
+        except Exception:
+            limit_text = driver.get_text("body")
+
+        # 精准匹配形如 "0 / 15" 或 "1 / 15" 的进度
+        m = re.search(r"(\d+)\s*/\s*15", limit_text)
         if m:
             current_count = int(m.group(1))
 
-        bm = re.search(r"([0-9]+\.[0-9]+)\s*(?:COIN\s*)?credits", body_text, re.IGNORECASE)
+        bm = re.search(r"([0-9]+\.[0-9]+)\s*(?:COIN\s*)?credits", limit_text, re.IGNORECASE)
         if bm:
             balance_str = bm.group(1)
         else:
-            bm2 = re.search(r"([0-9]+\.[0-9]+)", body_text)
-            if bm2:
-                balance_str = bm2.group(1)
+            body_text = driver.get_text("body")
+            bm3 = re.search(r"([0-9]+\.[0-9]+)\s*(?:COIN\s*)?credits", body_text, re.IGNORECASE)
+            if bm3:
+                balance_str = bm3.group(1)
     except Exception as e:
         print(f"  ⚠️ 提取余额状态异常: {e}")
     return current_count, balance_str
 
 
 def wait_for_lootlabs_ready(driver, timeout=30) -> bool:
-    """循环等待 LootLabs 任务墙真正渲染出任务卡片，并处理 Packet blocked"""
     print("  ⏳ 等待 LootLabs 任务卡片 DOM 挂载渲染...", flush=True)
     start = time.time()
     while time.time() - start < timeout:
         body = driver.get_text("body")
         
-        # 修复点 2：增加 Packet blocked 拦截的自动检测与 HERE 点击刷新
         if "Packet blocked" in body or "HERE" in body:
             print("  🚨 检测到 Packet blocked 软拦截，自动点击 [HERE] 刷新...", flush=True)
             try:
@@ -324,14 +329,12 @@ def run_single_task_loop(driver, round_num: int) -> bool:
         driver.get(REWARDS_URL)
         time.sleep(4)
 
-    # 1. 查找 Generate reward
     gen_btns = driver.find_elements(By.XPATH, "//button[normalize-space(.)='Generate reward' or contains(., 'Generate reward')]")
     if gen_btns and gen_btns[0].is_displayed():
         print(f"  👉 点击 [Generate reward] 生成第 {round_num} 轮任务...", flush=True)
         physical_click_trusted(driver, gen_btns[0])
         time.sleep(3)
 
-    # 2. 等待 Start reward 出现
     start_btn = None
     print("  ⏳ 等待异步接口返回 [Start reward]...", flush=True)
     for wait_i in range(25):
@@ -365,7 +368,6 @@ def run_single_task_loop(driver, round_num: int) -> bool:
     physical_click_trusted(driver, start_btn)
     time.sleep(5)
 
-    # 3. 切换到 LootLabs 标签页
     new_handles = set(driver.window_handles) - old_handles
     if not new_handles:
         if len(driver.window_handles) > 1:
@@ -381,13 +383,11 @@ def run_single_task_loop(driver, round_num: int) -> bool:
     time.sleep(3)
     print(f"  🌐 已切入 LootLabs: {driver.current_url}", flush=True)
 
-    # 关键防卡点：深度等待 LootLabs 任务容器挂载
     if not wait_for_lootlabs_ready(driver, timeout=25):
         print("  ⚠️ LootLabs 任务卡片未能正常渲染（可能白屏或需要人机），截图中...", flush=True)
         driver.save_screenshot(f"fail_lootlabs_loading_r{round_num}.png")
         return False
 
-    # 4. 解析任务 1 时长并点击触发
     wait_sec = 50
     try:
         body_text = driver.get_text("body")
@@ -399,7 +399,6 @@ def run_single_task_loop(driver, round_num: int) -> bool:
             print("  ℹ️ 未检测到具体秒数，采用基准等待 60 秒", flush=True)
             wait_sec = 60
 
-        # 精确锁定任务 1 行（通过其父级容器中的第一项）
         task1_selectors = [
             "//*[contains(text(), 'Complete Tasks to Continue')]/following::div[contains(@class, 'cursor-pointer') or .//button][1]",
             "(//*[contains(text(), 'Complete Tasks to Continue')]/following::*[contains(@class, 'rounded') and (.//button or .//svg)])[1]",
@@ -428,7 +427,6 @@ def run_single_task_loop(driver, round_num: int) -> bool:
 
         time.sleep(3)
 
-        # 如果弹出了广告新窗口，切过去挂机等待
         if len(driver.window_handles) > 2:
             ad_tab = driver.window_handles[-1]
             driver.switch_to.window(ad_tab)
@@ -449,7 +447,6 @@ def run_single_task_loop(driver, round_num: int) -> bool:
     time.sleep(3)
     driver.switch_to.window(lootlabs_tab)
 
-    # 5. 处理任务 2：CONFIRM YOU ARE HUMAN
     try:
         print("🛡️ 正在寻找并点击 [CONFIRM YOU ARE HUMAN] 验证项...", flush=True)
         human_selectors = [
@@ -469,7 +466,6 @@ def run_single_task_loop(driver, round_num: int) -> bool:
         solve_turnstile_box(driver, max_wait_sec=25)
         time.sleep(2)
 
-        # 点击蓝色 Continue 按钮
         continue_selectors = [
             "//button[normalize-space(.)='Continue' or text()='Continue']",
             "//button[contains(., 'Continue')]"
@@ -495,7 +491,6 @@ def run_single_task_loop(driver, round_num: int) -> bool:
     time.sleep(3)
     driver.switch_to.window(lootlabs_tab)
 
-    # 6. 最终点击蓝紫色 CLAIM REWARD
     claim_success = False
     try:
         print("🎁 等待打勾并击发 [CLAIM REWARD]...", flush=True)
@@ -509,7 +504,6 @@ def run_single_task_loop(driver, round_num: int) -> bool:
                 els = driver.find_elements(By.XPATH, sel)
                 for el in els:
                     is_disabled = el.get_attribute("disabled")
-                    # 只要显示且未 disabled（或者类名没有 disabled）
                     if el.is_displayed() and not is_disabled:
                         physical_click_trusted(driver, el)
                         print("  🎉 成功击发 [CLAIM REWARD] 领取积分！", flush=True)
@@ -524,7 +518,6 @@ def run_single_task_loop(driver, round_num: int) -> bool:
     except Exception as e:
         print(f"  ⚠️ 点击领取奖励异常: {e}", flush=True)
 
-    # 7. 清理多余标签页，返回 Freemchosting 控制台
     try:
         for handle in driver.window_handles:
             if handle != main_tab:
@@ -568,7 +561,6 @@ def main():
         current_count, balance_before = parse_daily_limit_and_balance(driver)
         print(f"📊 初始进度: {current_count}/15 | 计划轮数: {DAILY_TARGET} | 初始余额: {balance_before}", flush=True)
 
-        # 修复点 3：确保每次只看设定的 5 个广告，不再受总额强制停止的干扰
         while current_count < 15 and success_runs < DAILY_TARGET:
             target_round = current_count + 1
             print(f"\n🚀 === 执行第 {target_round} 轮赚积分任务 ===", flush=True)
