@@ -723,10 +723,10 @@ def main():
         proxy=uc_proxy,
         chromium_arg=" ".join(chromium_args),
     )
-    if IS_CI:
-        driver_kwargs["xvfb"] = True
+    # xvfb 由外层 workflow 的 xvfb-run 提供,此处不再传 xvfb=True
+    # (部分 seleniumbase 版本不支持该参数,会 TypeError)
 
-    print(f"🌐 启动浏览器 (xvfb={IS_CI}) ...", flush=True)
+    print("🌐 启动浏览器 (xvfb 由 workflow 提供) ...", flush=True)
     driver = Driver(**driver_kwargs)
 
     try:
