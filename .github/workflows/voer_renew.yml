@@ -2,7 +2,8 @@ name: VOER Host Auto Renew
 
 on:
   schedule:
-    - cron: '20 5 13 9 *'
+    # 固定每 3 小时整点轮询一次 (UTC 时间 0, 3, 6, 9, 12, 15, 18, 21 点)
+    - cron: '0 */3 * * *'
   workflow_dispatch:
 
 jobs:
@@ -12,8 +13,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.REPO_TOKEN }}
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -47,8 +47,7 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
         run: |
-          touch output.log
-          xvfb-run -a -s "-screen 0 1920x1080x24" python -u renew_voer.py 2>&1 | tee -a output.log
+          xvfb-run -a -s "-screen 0 1920x1080x24" python -u renew_voer.py
 
       - name: 上传排查截图
         if: always()
@@ -58,44 +57,3 @@ jobs:
           path: |
             *.png
           if-no-files-found: ignore
-
-      - name: 更新 Cron
-        if: always()
-        env:
-          GITHUB_TOKEN: ${{ secrets.REPO_TOKEN }}
-          WORKFLOW_NAME: ${{ github.workflow }}
-        run: |
-          NEXT_RUN_UTC=$(grep -oP 'NEXT_RUN_UTC=\K.*' output.log | tail -1)
-          if [ -n "$NEXT_RUN_UTC" ]; then
-            echo "下次运行时间 (UTC): $NEXT_RUN_UTC"
-            CRON=$(date -u -d "$NEXT_RUN_UTC" +"%-M %-H %-d %-m *")
-            echo "新 cron: $CRON"
-
-            WORKFLOW_FILE=$(grep -lE "^name:\s*['\"]?$WORKFLOW_NAME['\"]?\s*$" .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null | head -1)
-            if [ -z "$WORKFLOW_FILE" ]; then
-              echo "❌ 未找到匹配的工作流文件，跳过 cron 更新"
-              exit 0
-            fi
-
-            echo "找到工作流文件: $WORKFLOW_FILE"
-            sed -i "0,/cron: '.*'/s//cron: '$CRON'/" "$WORKFLOW_FILE"
-
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-
-            # 仅暂存更新后的 workflow 文件并提交
-            git add "$WORKFLOW_FILE"
-            COMMIT_MSG="下次执行时间：$(date -u -d "$NEXT_RUN_UTC" '+%Y年%m月%d日 %H:%M UTC')"
-            git commit -m "$COMMIT_MSG" || echo "没有变更需要提交"
-
-            # 彻底清理运行产生的图片、log 等未追踪文件，避免阻碍 git rebase
-            git checkout -- . 2>/dev/null || true
-            git clean -fd
-
-            # 拉取最新提交并推送
-            git pull --rebase origin main
-            git push origin main
-            echo "✅ Cron 已自动更新并成功推送！"
-          else
-            echo "未检测到 NEXT_RUN_UTC，跳过 cron 更新"
-          fi
