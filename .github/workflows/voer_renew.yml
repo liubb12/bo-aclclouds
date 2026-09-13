@@ -1,10 +1,7 @@
 name: VOER Host Auto Renew
 
 on:
-  schedule:
-    # 固定每 3 小时整点轮询一次 (UTC 时间 0, 3, 6, 9, 12, 15, 18, 21 点)
-    - cron: '0 */3 * * *'
-  workflow_dispatch:
+  workflow_dispatch: # 专门接收外部面板 API 或网页手动触发
 
 jobs:
   renew:
@@ -22,7 +19,6 @@ jobs:
 
       - name: Install Gost Proxy & Dependencies
         run: |
-          # 安装 gost 官方发布版
           curl -fL https://github.com/go-gost/gost/releases/download/v3.0.0/gost_3.0.0_linux_amd64.tar.gz -o gost.tar.gz || \
           curl -fsSL https://pkg.gost.run/install.sh | bash || true
 
@@ -32,7 +28,6 @@ jobs:
             rm -f gost.tar.gz
           fi
 
-          # 安装虚拟桌面及 Python 依赖
           sudo apt-get update
           sudo apt-get install -y xvfb
           python -m pip install --upgrade pip
