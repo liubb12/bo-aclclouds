@@ -1,7 +1,9 @@
 name: VOER Host Auto Renew
 
 on:
-  workflow_dispatch: # 专门接收外部面板 API 或网页手动触发
+  workflow_dispatch: # 支持网页手动点击或通过 workflow API 触发
+  repository_dispatch:
+    types: [voer_renew, trigger_renew] # 允许外部 Webhook / API 唤醒
 
 jobs:
   renew:
@@ -38,6 +40,8 @@ jobs:
         env:
           VOER_SERVER_ID: ${{ secrets.VOER_SERVER_ID }}
           VOER_COOKIES: ${{ secrets.VOER_COOKIES }}
+          VOER_EMAIL: ${{ secrets.VOER_EMAIL || secrets.VOER_USERNAME }}
+          VOER_PASSWORD: ${{ secrets.VOER_PASSWORD }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
