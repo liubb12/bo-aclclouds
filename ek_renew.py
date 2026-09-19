@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动巡检与续期 (纯 API 穿透版 · 彻底告别 Code 11 白屏)
+# EKNodes 自动巡检、开机检测与续期 (带 Telegram 实景截图版)
 # ============================================================
 import html
 import os
+import random
 import re
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 import requests
+from seleniumbase import Driver
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
 
 BASE_URL = "https://dash.eknodes.es"
 SERVERS_URL = f"{BASE_URL}/servers"
@@ -21,19 +25,34 @@ EK_COOKIE = os.environ.get("EK_COOKIE", "").strip()
 SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 
 
-def tg_send(text: str):
+def human_sleep(min_s=1.0, max_s=2.0):
+    time.sleep(random.uniform(min_s, max_s))
+
+
+def tg_send(text: str, photo_path: str = None):
+    """支持图文一体推送至 Telegram"""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("⚠️ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过通知。")
         return
     try:
-        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-        resp = requests.post(
-            url,
-            data={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"},
-            timeout=30,
-        )
+        if photo_path and os.path.exists(photo_path) and os.path.getsize(photo_path) > 1000:
+            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
+            with open(photo_path, "rb") as f:
+                resp = requests.post(
+                    url,
+                    data={"chat_id": TG_CHAT_ID, "caption": text, "parse_mode": "HTML"},
+                    files={"photo": f},
+                    timeout=30,
+                )
+        else:
+            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+            resp = requests.post(
+                url,
+                data={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"},
+                timeout=30,
+            )
         if resp.status_code == 200:
-            print("  ✅ TG 通知发送成功", flush=True)
+            print("  ✅ TG 图文通知发送成功", flush=True)
         else:
             print(f"  ⚠️ TG 返回码 {resp.status_code}: {resp.text}", flush=True)
     except Exception as e:
@@ -80,7 +99,66 @@ def start_gost(socks_proxy: str) -> subprocess.Popen:
     return proc
 
 
-def extract_cookies(raw_input: str) -> dict:
+def human_click(driver, element):
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", element)
+        human_sleep(0.2, 0.4)
+        ActionChains(driver).move_to_element(element).pause(random.uniform(0.1, 0.3)).click().perform()
+    except Exception:
+        driver.execute_script("arguments[0].click();", element)
+
+
+def solve_modal_turnstile(driver, timeout=30):
+    """穿透弹窗内的 Cloudflare Turnstile 复选框"""
+    print("  🛡️ 正在攻破弹窗内的 Turnstile 验证...", flush=True)
+    start = time.time()
+
+    while time.time() - start < timeout:
+        confirm_btn = driver.find_elements(By.XPATH, "//button[contains(., 'CONFIRMAR RENOVACIÓN') or contains(., 'Confirmar')]")
+        if confirm_btn:
+            btn = confirm_btn[0]
+            is_disabled = btn.get_attribute("disabled")
+            aria_disabled = btn.get_attribute("aria-disabled")
+            classes = btn.get_attribute("class") or ""
+            if not is_disabled and aria_disabled != "true" and "opacity-50" not in classes:
+                print("  🟢 [CONFIRMAR RENOVACIÓN] 按钮已点亮激活！", flush=True)
+                return True
+
+        try:
+            driver.uc_gui_click_cf()
+        except Exception:
+            try:
+                driver.uc_gui_click_captcha()
+            except Exception:
+                pass
+
+        try:
+            driver.switch_to.default_content()
+            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            for f in iframes:
+                src = f.get_attribute("src") or ""
+                if any(k in src for k in ("cloudflare", "turnstile", "challenges")):
+                    driver.switch_to.frame(f)
+                    time.sleep(0.3)
+                    boxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox'], #checkbox, .ctp-checkbox-label")
+                    if boxes:
+                        ActionChains(driver).move_to_element(boxes[0]).pause(0.2).click().perform()
+                        print("  🎯 成功切入 iframe 点击复选框！", flush=True)
+                    driver.switch_to.default_content()
+                    break
+        except Exception:
+            driver.switch_to.default_content()
+
+        time.sleep(2)
+
+    return False
+
+
+def smart_inject_cookies(driver, raw_input: str):
+    """提取凭据并注入当前域名"""
+    if not raw_input:
+        return 0
+
     cookie_str = raw_input
     match_h = re.search(r"(?i)-H\s+['\"]cookie:\s*(.*?)['\"]", raw_input)
     if match_h:
@@ -90,19 +168,107 @@ def extract_cookies(raw_input: str) -> dict:
         if match_b:
             cookie_str = match_b.group(1)
 
-    cookies = {}
-    for item in cookie_str.split(";"):
-        item = item.strip()
-        if not item or "=" not in item:
+    cookies_list = []
+    for pair in cookie_str.split(";"):
+        pair = pair.strip()
+        if not pair or "=" not in pair:
             continue
-        k, v = item.split("=", 1)
-        cookies[k.strip()] = v.strip()
-    return cookies
+        k, v = pair.split("=", 1)
+        cookies_list.append((k.strip(), v.strip()))
+
+    injected = 0
+    for name, value in cookies_list:
+        for domain in ["dash.eknodes.es", ".eknodes.es"]:
+            try:
+                driver.add_cookie({
+                    "name": name,
+                    "value": value,
+                    "domain": domain,
+                    "path": "/",
+                    "sameSite": "Lax"
+                })
+                injected += 1
+                break
+            except Exception:
+                try:
+                    driver.add_cookie({"name": name, "value": value, "path": "/"})
+                    injected += 1
+                    break
+                except Exception:
+                    pass
+    return injected
+
+
+def parse_server_cards(driver):
+    """解析页面卡片信息"""
+    results = []
+    cards = driver.find_elements(By.XPATH, "//div[contains(., 'Expira') and (contains(., 'GESTIONAR') or contains(., 'RENOVAR'))]")
+    for card in cards:
+        text = card.text.strip()
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        name = lines[0] if lines else "Server"
+
+        exp_match = re.search(r'Expira\s+([0-9]{1,2}\s+[a-zA-Z]+\s+[0-9]{4})', text)
+        exp_date = exp_match.group(1).strip() if exp_match else "未知"
+
+        status = "ONLINE"
+        if "Iniciando" in text:
+            status = "Iniciando (启动中)"
+        elif "Instalando" in text:
+            status = "Instalando (安装中)"
+        elif any(k in text for k in ("Inactivo", "Detenido", "Apagado", "Offline")):
+            status = "STOPPED (已关机/停止)"
+        elif "Activo" in text:
+            status = "Activo (运行中)"
+
+        results.append({
+            "element": card,
+            "name": name,
+            "status": status,
+            "exp_date": exp_date,
+            "text": text
+        })
+    return results
+
+
+def check_power_and_start(driver, cards_data):
+    """针对停机实例自动进控制台开机"""
+    actions = []
+    main_window = driver.current_window_handle
+
+    for item in cards_data:
+        if "STOPPED" in item["status"]:
+            print(f"⚡ 检测到 [{item['name']}] 处于停止状态，尝试进入后台启动...", flush=True)
+            try:
+                gest_btn = item["element"].find_element(By.XPATH, ".//button[contains(., 'GESTIONAR')]")
+                human_click(driver, gest_btn)
+                time.sleep(5)
+
+                for handle in driver.window_handles:
+                    if handle != main_window:
+                        driver.switch_to.window(handle)
+                        break
+
+                start_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Start') or contains(., 'Iniciar')]")
+                if start_btns and start_btns[0].is_enabled():
+                    human_click(driver, start_btns[0])
+                    actions.append(f"{item['name']}: 已发送开机指令")
+                    time.sleep(3)
+                driver.close()
+                driver.switch_to.window(main_window)
+            except Exception as e:
+                print(f"开机拉起执行异常: {e}", flush=True)
+                try:
+                    driver.switch_to.window(main_window)
+                except Exception:
+                    pass
+
+    return " | ".join(actions) if actions else "全部正常运行"
 
 
 def main():
     print("=" * 45, flush=True)
-    print(" EKNodes 自动巡检与续期 (纯 API 通道)", flush=True)
+    print(" EKNodes 自动巡检与续期 (带实景截图)", flush=True)
     print("=" * 45, flush=True)
 
     if not EK_COOKIE:
@@ -110,84 +276,138 @@ def main():
         return
 
     gost_proc = None
-    proxies = None
+    uc_proxy = None
 
     if SOCKS5_PROXY:
         try:
             gost_proc = start_gost(SOCKS5_PROXY)
-            proxies = {
-                "http": f"http://127.0.0.1:{LOCAL_HTTP_PORT}",
-                "https": f"http://127.0.0.1:{LOCAL_HTTP_PORT}",
-            }
-            print("🔗 代理已挂载生效。", flush=True)
+            uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
+            print("🔗 代理已启动并生效。", flush=True)
         except Exception as e:
-            print(f"⚠️ 代理启动异常：{e}，采用直连。", flush=True)
+            print(f"⚠️ 代理启动失败：{e}，采用直连模式。", flush=True)
 
-    session = requests.Session()
-    if proxies:
-        session.proxies.update(proxies)
-
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    })
-
-    cookies_dict = extract_cookies(EK_COOKIE)
-    session.cookies.update(cookies_dict)
-    print(f"🍪 已装配 {len(cookies_dict)} 个 Session 凭据", flush=True)
-
-    now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+    # 启动全高清无头防检浏览器
+    driver = Driver(
+        uc=True,
+        headless=False,
+        proxy=uc_proxy,
+        uc_subprocess=True,
+    )
 
     try:
-        print("🌐 正在拉取控制台服务器页面数据...", flush=True)
-        resp = session.get(SERVERS_URL, timeout=20)
+        # 1. 访问控制台建立上下文
+        print(f"🌐 [步骤 1] 访问控制台建立 Session 上下文...", flush=True)
+        driver.uc_open_with_reconnect(BASE_URL, reconnect_time=4)
+        human_sleep(2.0, 3.5)
 
-        # 检查是否放行
-        if "Failed to verify your browser" in resp.text:
-            raise RuntimeError("凭证已被 Vercel 拦截，请在浏览器重新刷新控制台并复制最新 cURL 中的 Cookie！")
+        # 2. 注入 Cookie
+        print("🍪 [步骤 2] 注入 Cookie 凭据...", flush=True)
+        injected = smart_inject_cookies(driver, EK_COOKIE)
+        print(f"  ✅ 成功注入 {injected} 个 Session 凭据！", flush=True)
 
-        html_text = resp.text
+        # 3. 直达服务器列表页
+        print(f"🚀 [步骤 3] 跳转到服务器列表: {SERVERS_URL} ...", flush=True)
+        driver.get(SERVERS_URL)
+        human_sleep(4.0, 6.0)
 
-        # 正则提取卡片核心数据：实例名、到期时间、状态
-        names = re.findall(r'<h3[^>]*>([^<]+)</h3>|<div[^>]*class="[^"]*font-bold[^"]*"[^>]*>([^<]+)</div>', html_text)
-        server_name = "mi fghko"
-        for n1, n2 in names:
-            val = (n1 or n2).strip()
-            if val and val not in ("SERVIDORES", "Inicio", "Servidores", "Tienda", "Soporte"):
-                server_name = val
+        # 4. 等待卡片数据渲染
+        print("⏳ [步骤 4] 等待卡片动态数据加载...", flush=True)
+        for _ in range(15):
+            body = driver.get_text("body")
+            if "RENOVAR" in body or "Expira" in body or "GESTIONAR" in body:
+                print("  🎯 成功识别到服务器卡片！", flush=True)
                 break
+            time.sleep(1)
 
-        match_exp = re.search(r'Expira\s+([0-9]{1,2}\s+[a-zA-Z]+\s+[0-9]{4})', html_text)
-        exp_date = match_exp.group(1).strip() if match_exp else "未知"
+        # 截取渲染完成后的控制台实景
+        screenshot_path = "ek_servers.png"
+        driver.save_screenshot(screenshot_path)
+        print("📸 已截取当前面板实景图片", flush=True)
 
-        status = "运行中 (Online)"
-        if "Iniciando" in html_text:
-            status = "Iniciando (启动中)"
-        elif any(k in html_text for k in ("Inactivo", "Detenido", "Apagado")):
-            status = "已关机/已停止"
+        # 5. 解析卡片信息与电源巡检
+        cards_data = parse_server_cards(driver)
+        power_status = check_power_and_start(driver, cards_data)
 
-        server_info = f"• <b>{server_name}</b>: 状态 <code>{status}</code> | 到期 <code>{exp_date}</code>"
-        print(f"📊 获取到的真实服务器状态:\n{server_info}", flush=True)
+        status_text_list = [f"• <b>{c['name']}</b>: 状态 <code>{c['status']}</code> | 到期 <code>{c['exp_date']}</code>" for c in cards_data]
+        status_before = "\n".join(status_text_list) if status_text_list else "服务器正常运行"
+        print(f"📊 当前服务器状态:\n{status_before}\n⚡ 电源动作: {power_status}", flush=True)
 
-        # 判断是否具有待续期按钮
-        has_renovar = "RENOVAR" in html_text or "renovar" in html_text
+        now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
+        # 6. 定位 RENOVAR 续期按钮
+        renovar_buttons = driver.find_elements(By.XPATH, "//button[contains(., 'RENOVAR') or .//text()[contains(., 'RENOVAR')]]")
+
+        if not renovar_buttons:
+            print("ℹ️ 当前未找到待续期按钮（周期已满 7 天无需续期）。", flush=True)
+            tg_send(
+                f"🛡️ <b>EKNodes 自动巡检报告</b>\n\n"
+                f"⚡ <b>电源状态：</b><code>{power_status}</code>\n"
+                f"📊 <b>实例状态：</b>\n{status_before}\n\n"
+                f"⏭️ <b>执行结果：</b><code>周期已满 7 天 (维持满期)</code>\n"
+                f"⏰ <b>巡检时间：</b><code>{now_time}</code>",
+                photo_path=screenshot_path
+            )
+            print("✅ 图文巡检报告已发送至 Telegram！", flush=True)
+            return
+
+        # 7. 存在待续期服务器，点击并处理弹窗
+        renew_success = False
+        for idx, btn in enumerate(renovar_buttons):
+            server_name = cards_data[idx]["name"] if idx < len(cards_data) else f"Server-{idx+1}"
+            print(f"👉 正在点击 [{server_name}] 的 RENOVAR 按钮...", flush=True)
+            human_click(driver, btn)
+            human_sleep(2.5, 3.5)
+
+            try:
+                driver.wait_for_element_visible("//div[contains(., 'RENOVAR SERVIDOR')]", timeout=10)
+                print("  🪟 [RENOVAR SERVIDOR] 弹窗已浮现！", flush=True)
+            except Exception:
+                pass
+
+            # 穿透弹窗内 Turnstile
+            solve_modal_turnstile(driver, timeout=30)
+            human_sleep(1.0, 2.0)
+
+            confirm_xpath = "//button[contains(., 'CONFIRMAR RENOVACIÓN') or contains(., 'Confirmar')]"
+            confirm_btns = driver.find_elements(By.XPATH, confirm_xpath)
+            if confirm_btns and confirm_btns[0].is_displayed():
+                print("  🚀 点击 [CONFIRMAR RENOVACIÓN] 确认续期！", flush=True)
+                human_click(driver, confirm_btns[0])
+                renew_success = True
+                human_sleep(5.0, 7.0)
+
+        # 8. 刷新获取最新状态并更新截图
+        driver.refresh()
+        human_sleep(4.0, 6.0)
+        cards_after = parse_server_cards(driver)
+        status_after_list = [f"• <b>{c['name']}</b>: 状态 <code>{c['status']}</code> | 到期 <code>{c['exp_date']}</code>" for c in cards_after]
+        status_after = "\n".join(status_after_list) if status_after_list else status_before
+
+        final_shot_path = "ek_final.png"
+        driver.save_screenshot(final_shot_path)
+
+        result_tag = "✅ 续期完成 (+7天)" if renew_success else "✅ 巡检正常 (维持满期)"
         tg_send(
-            f"🛡️ <b>EKNodes 服务器巡检报告 (API 穿透成功)</b>\n\n"
-            f"📊 <b>实例状态：</b>\n{server_info}\n\n"
-            f"⏭️ <b>执行结果：</b><code>周期已满 7 天 (无需续期)</code>\n"
-            f"⏰ <b>巡检时间：</b><code>{now_time}</code>"
+            f"🎉 <b>EKNodes 巡检与续期报告</b>\n\n"
+            f"⚡ <b>电源状态：</b><code>{power_status}</code>\n"
+            f"⏳ <b>续期前状态：</b>\n{status_before}\n\n"
+            f"⌛ <b>续期后状态：</b>\n{status_after}\n\n"
+            f"📊 <b>执行结果：</b><code>{result_tag}</code>\n"
+            f"⏰ <b>执行时间：</b><code>{now_time}</code>",
+            photo_path=final_shot_path
         )
-        print("🎉 巡检完成，真实数据已成功发送至 Telegram！", flush=True)
+        print("🎉 全部流程已完成，实景截图与图文报告已推送至 Telegram！", flush=True)
 
     except Exception as e:
         err = str(e)
         print(f"❌ 执行异常: {err}", flush=True)
-        tg_send(f"🔴 <b>EKNodes 巡检异常</b>\n\n<code>{html.escape(err)}</code>")
+        try:
+            driver.save_screenshot("ek_error.png")
+            tg_send(f"🔴 <b>EKNodes 异常</b>\n\n<code>{html.escape(err)}</code>", photo_path="ek_error.png")
+        except Exception:
+            pass
     finally:
+        driver.quit()
         if gost_proc:
             gost_proc.terminate()
             print("gost 代理已退出。", flush=True)
