@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动登录、服务器续期与电源巡检脚本 (图文增强版)
+# EKNodes 自动登录与服务器续期脚本 (穿透 Vercel Checkpoint 版)
 # ============================================================
 import html
 import os
@@ -144,7 +144,7 @@ def click_turnstile_checkbox(driver, timeout=30):
             print("  🟢 页面已成功放行！", flush=True)
             return True
 
-        # 切入 iframe 物理点击
+        # 方法 1：切入 iframe 物理点击
         try:
             driver.switch_to.default_content()
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
@@ -162,7 +162,7 @@ def click_turnstile_checkbox(driver, timeout=30):
         except Exception:
             driver.switch_to.default_content()
 
-        # SeleniumBase 专用 bypass 辅助
+        # 方法 2：SeleniumBase 原生接口兜底
         try:
             driver.uc_gui_click_cf()
         except Exception:
@@ -180,9 +180,8 @@ def click_turnstile_checkbox(driver, timeout=30):
 
 
 def get_servers_info(driver):
-    """提取页面上的服务器卡片信息及其实例状态"""
+    """提取页面上的服务器卡片信息"""
     info = []
-    cards_data = []
     try:
         cards = driver.find_elements(By.XPATH, "//div[contains(@class, 'rounded') and (.//button[contains(., 'RENOVAR')] or .//button[contains(., 'GESTIONAR')])]")
         if not cards:
@@ -195,51 +194,36 @@ def get_servers_info(driver):
             lines = [l.strip() for l in text.split("\n") if l.strip()]
             name = lines[0] if lines else "Server"
 
-            # 抓取状态标签（如 Instalando、Activo、Detenido 等）
             status = "ONLINE"
             if "Instalando" in text:
                 status = "Instalando (安装中)"
-            elif "Inactivo" in text or "Detenido" in text or "Apagado" in text:
+            elif "Inactivo" in text or "Detenido" in text:
                 status = "STOPPED (已停止)"
             elif "Activo" in text:
                 status = "Activo (运行中)"
 
-            cards_data.append({"name": name, "exp_date": exp_date, "status": status})
-            info.append(f"• <b>{name}</b>: 状态 <code>{status}</code> | 到期 <code>{exp_date}</code>")
+            info.append(f"• <b>{name}</b>: 状态 <code>{status}</code> | 到期时间 <code>{exp_date}</code>")
     except Exception as e:
         print(f"提取状态异常: {e}")
-
-    summary_str = "\n".join(info) if info else "服务器正常运行"
-    return summary_str, cards_data
+    return "\n".join(info) if info else "服务器运行正常"
 
 
-def check_and_start_if_stopped(driver):
-    """若在控制台卡片中检测到已停止，点击 GESTIONAR 进入控制台尝试开机"""
-    try:
-        cards = driver.find_elements(By.XPATH, "//div[contains(@class, 'rounded') and .//button[contains(., 'GESTIONAR')]]")
-        for c in cards:
-            text = c.text
-            if "Inactivo" in text or "Detenido" in text or "Apagado" in text:
-                print("  ⚡ 检测到服务器停机，点击 GESTIONAR 尝试拉起...", flush=True)
-                btn = c.find_element(By.XPATH, ".//button[contains(., 'GESTIONAR')]")
-                main_w = driver.current_window_handle
-                human_click(driver, btn)
-                time.sleep(5)
-                # 切入新打开的控制台
-                for w in driver.window_handles:
-                    if w != main_w:
-                        driver.switch_to.window(w)
-                        start_btn = driver.find_elements(By.XPATH, "//button[contains(., 'Start') or contains(., 'Iniciar')]")
-                        if start_btn and start_btn[0].is_enabled():
-                            human_click(driver, start_btn[0])
-                            print("  👉 控制台中已点击 Start 开机！", flush=True)
-                            time.sleep(3)
-                        driver.close()
-                driver.switch_to.window(main_w)
-                return "已执行开机"
-    except Exception:
-        pass
-    return "正常运行"
+def handle_vercel_checkpoint(driver, max_retries=3):
+    """检测并穿透 Vercel Checkpoint 阻拦"""
+    for attempt in range(max_retries):
+        body_text = driver.get_text("body")
+        if "Vercel Security Checkpoint" in body_text or "Failed to verify your browser" in body_text:
+            print(f"  🛡️ 检测到 Vercel Checkpoint 拦截，正在尝试解除 (第 {attempt+1} 次)...", flush=True)
+            try:
+                driver.uc_gui_click_captcha()
+            except Exception:
+                pass
+            time.sleep(3)
+            driver.refresh()
+            time.sleep(5)
+        else:
+            return True
+    return False
 
 
 def main():
@@ -260,18 +244,44 @@ def main():
         except Exception as e:
             print(f"⚠️ 代理启动失败：{e}，尝试直连。", flush=True)
 
-    driver = Driver(uc=True, headless=False, proxy=uc_proxy)
+    # 注入规避 Vercel Checkpoint 的核心参数（桌面UA + 软件模拟 WebGL）
+    chromium_args = [
+        "--start-maximized",
+        "--window-size=1920,1080",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--use-gl=swiftshader",
+        "--enable-webgl",
+        "--ignore-certificate-errors",
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    ]
+
+    driver = Driver(
+        uc=True,
+        headless=False,
+        proxy=uc_proxy,
+        chromium_arg=" ".join(chromium_args),
+    )
 
     try:
-        # 1. 访问登录页
+        driver.maximize_window()
+    except Exception:
+        pass
+
+    try:
+        # 1. 访问登录页并重连
         print(f"🌐 正在访问登录页: {LOGIN_URL} ...", flush=True)
-        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=6)
-        human_sleep(3.0, 4.5)
+        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
+        human_sleep(3.0, 5.0)
+
+        # 检查是否命中 Vercel 防火墙
+        handle_vercel_checkpoint(driver)
 
         if "/servers" not in driver.current_url:
-            email_elem = driver.wait_for_element_visible("input[type='email'], input[type='text']", timeout=20)
+            user_selector = "input[type='email'], input[type='text'], input[name='email'], input[name='username']"
+            email_elem = driver.wait_for_element_visible(user_selector, timeout=25)
             masked_acc = login_account[:3] + "***" if len(login_account) > 3 else "***"
-            print(f"  📝 [第一步] 填入登录邮箱账号: {masked_acc}", flush=True)
+            print(f"  📝 [第一步] 填入登录账号: {masked_acc}", flush=True)
             human_type(driver, email_elem, login_account)
             human_sleep(0.5, 0.8)
 
@@ -281,7 +291,7 @@ def main():
             human_sleep(0.6, 1.2)
 
             submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'INICIAR SESIÓN') or contains(., 'Iniciar')]")
-            print("🔑 [第一步] 点击 INICIAR SESIÓN 按钮提交...", flush=True)
+            print("🔑 [第一步] 点击 INICIAR SESIÓN 提交...", flush=True)
             human_click(driver, submit_btn)
 
             human_sleep(2.0, 3.0)
@@ -310,10 +320,8 @@ def main():
         except Exception:
             print("  ⚠️ 等待主元素超时，继续尝试检索卡片...", flush=True)
 
-        # 状态提取与电源检测
-        status_before, cards_data = get_servers_info(driver)
-        power_action = check_and_start_if_stopped(driver)
-        print(f"📊 当前服务器状态:\n{status_before}\n⚡ 电源动作: {power_action}", flush=True)
+        status_before = get_servers_info(driver)
+        print(f"📊 当前服务器状态:\n{status_before}", flush=True)
 
         # 3. 抓取待续期按钮
         renovar_btn_xpath = "//button[contains(., 'RENOVAR') or contains(., 'Renovar')]"
@@ -321,28 +329,24 @@ def main():
 
         now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
-        # 若未找到 RENOVAR 按钮（满期 7 天无需续期）
         if not renovar_buttons:
             print("ℹ️ 当前页面未检测到待续期按钮（服务器周期已是满额 7 天）。", flush=True)
             driver.save_screenshot("ek_current_status.png")
             tg_send(
-                f"🛡️ <b>EKNodes 自动巡检报告</b>\n\n"
-                f"🔌 <b>电源操作：</b><code>{power_action}</code>\n"
-                f"📊 <b>当前实例状态：</b>\n{status_before}\n\n"
-                f"⏭️ <b>执行结果：</b><code>周期已达上限，无需续期</code>\n"
+                f"🛡️ <b>EKNodes 自动巡检正常</b>\n\n"
+                f"当前服务器到期时间充足（无需续期）：\n{status_before}\n\n"
                 f"⏰ <b>巡检时间：</b><code>{now_time}</code>",
-                photo_path="ek_current_status.png",
+                photo_path="ek_current_status.png"
             )
             print("✅ 状态正常通知已推送到 Telegram。", flush=True)
             return
 
-        # 4. 逐一点击续期
+        # 4. 逐一执行续期
         for idx, btn in enumerate(renovar_buttons):
             print(f"👉 正在点击第 {idx+1}/{len(renovar_buttons)} 台服务器的 RENOVAR 按钮...", flush=True)
             human_click(driver, btn)
             human_sleep(3.0, 4.5)
 
-            # 穿透弹窗内 Turnstile
             print("  🛡️ 检查并处理续期弹窗内 Turnstile 验证码...", flush=True)
             click_turnstile_checkbox(driver, timeout=20)
             human_sleep(1.5, 2.5)
@@ -359,16 +363,15 @@ def main():
         # 5. 刷新获取续期后状态并推送
         driver.refresh()
         human_sleep(4.0, 6.0)
-        status_after, _ = get_servers_info(driver)
+        status_after = get_servers_info(driver)
         driver.save_screenshot("ek_final.png")
 
         tg_send(
-            f"🎉 <b>EKNodes 服务器续期巡检报告</b>\n\n"
-            f"🔌 <b>电源操作：</b><code>{power_action}</code>\n"
-            f"⏳ <b>续期前状态：</b>\n{status_before}\n\n"
-            f"⌛ <b>续期后状态：</b>\n{status_after}\n\n"
+            f"🎉 <b>EKNodes 服务器自动续期成功</b>\n\n"
+            f"<b>续期前：</b>\n{status_before}\n\n"
+            f"<b>续期后：</b>\n{status_after}\n\n"
             f"⏰ <b>执行时间：</b><code>{now_time}</code>",
-            photo_path="ek_final.png",
+            photo_path="ek_final.png"
         )
         print("\n🎉 全部操作已顺利完成，已推送到 Telegram！", flush=True)
 
