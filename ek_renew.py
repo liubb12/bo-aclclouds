@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动登录与续期脚本 (模拟真实人类操作全流程版)
+# EKNodes 自动登录与续期脚本 (多窗口自适应与人机穿透修复版)
 # ============================================================
 import html
 import os
@@ -137,24 +137,21 @@ def human_click(driver, element):
 
 
 def solve_turnstile_challenge(driver, timeout=35, tag="Turnstile"):
-    """专为穿透 Cloudflare Turnstile 复选框设计"""
+    """穿透 Cloudflare Turnstile 复选框"""
     print(f"  🛡️ 正在检测并处理 [{tag}] 验证框...", flush=True)
     start = time.time()
     while time.time() - start < timeout:
-        # 如果已经成功跳转进入后台或主页
         curr = driver.current_url
         if "/servers" in curr or (BASE_URL in curr and "/login" not in curr):
             print("  🟢 检测到已成功放行并跳转！", flush=True)
             return True
 
-        # 如果是续期弹窗，检查确认按钮是否点亮
         if tag == "续期确认":
             confirm = driver.find_elements(By.XPATH, "//button[contains(., 'CONFIRMAR') or contains(., 'Confirmar')]")
             if confirm and confirm[0].is_enabled():
                 print("  🟢 确认续期按钮已激活！", flush=True)
                 return True
 
-        # 1. SeleniumBase 原生接口辅助
         try:
             driver.uc_gui_click_cf()
         except Exception:
@@ -163,7 +160,6 @@ def solve_turnstile_challenge(driver, timeout=35, tag="Turnstile"):
             except Exception:
                 pass
 
-        # 2. 深入 iframe 点击 checkbox
         try:
             driver.switch_to.default_content()
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
@@ -237,7 +233,6 @@ def main():
         except Exception as e:
             print(f"⚠️ 代理启动失败：{e}，尝试直连模式。", flush=True)
 
-    # 抹除自动化特征
     driver = Driver(
         uc=True,
         headless=False,
@@ -246,32 +241,34 @@ def main():
     )
 
     try:
-        # 第一步：先访问主站 eknodes.es 建立可信连接，避开直接访问 /login 触发 Code 11
+        # 1. 访问主站入口建立可信连接
         print(f"🌐 [步骤 1] 访问主站入口: {ROOT_URL} ...", flush=True)
         driver.uc_open_with_reconnect(ROOT_URL, reconnect_time=4)
         human_sleep(2.0, 3.5)
 
-        # 寻找顶部的 Panel 按钮点击进入
+        main_win = driver.current_window_handle
         panel_btns = driver.find_elements(By.XPATH, "//a[contains(., 'Panel')] | //button[contains(., 'Panel')]")
         if panel_btns:
             print("  👉 点击主站右上角 [Panel] 按钮跳转...", flush=True)
             human_click(driver, panel_btns[0])
-            human_sleep(4.0, 6.0)
+            human_sleep(3.0, 5.0)
+
+            # 关键：切换到新弹出的控制台标签页
+            for handle in driver.window_handles:
+                if handle != main_win:
+                    driver.switch_to.window(handle)
+                    break
         else:
-            print("  🌐 直接导航至登录页...", flush=True)
             driver.get(LOGIN_URL)
-            human_sleep(4.0, 6.0)
+            human_sleep(3.0, 5.0)
 
-        # 遇到 Vercel 拦截屏自动尝试穿透
-        if "Failed to verify your browser" in driver.get_text("body"):
-            print("  🛡️ 触发 Vercel Checkpoint，执行自动穿透...", flush=True)
-            try:
-                driver.uc_gui_click_cf()
-            except Exception:
-                pass
-            human_sleep(4.0, 6.0)
+        # 确保当前窗口处在 dash.eknodes.es
+        if "dash.eknodes.es" not in driver.current_url:
+            print("  🌐 导航至登录界面...", flush=True)
+            driver.get(LOGIN_URL)
+            human_sleep(3.0, 5.0)
 
-        # 第二步：填入邮箱和密码
+        # 2. 定位并填入账号密码
         print("📝 [步骤 2] 等待登录表单加载...", flush=True)
         input_xpath = "//input[@type='email' or @type='text' or contains(@placeholder, 'CORREO') or contains(@placeholder, 'email')]"
         email_elem = driver.wait_for_element_visible(input_xpath, timeout=30)
@@ -286,17 +283,16 @@ def main():
         human_type(driver, pwd_elem, EK_PASSWORD)
         human_sleep(0.6, 1.2)
 
-        # 第三步：点击 INICIAR SESIÓN 按钮
+        # 3. 提交登录表单
         submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'INICIAR SESIÓN') or contains(., 'Iniciar')]")
         print("🔑 [步骤 3] 点击 INICIAR SESIÓN 提交...", flush=True)
         human_click(driver, submit_btn)
 
-        # 第四步：处理提交后弹出的 Turnstile 验证框
+        # 4. 穿透提交后弹出的 Turnstile 验证框
         human_sleep(2.5, 3.5)
         print("🛡️ [步骤 4] 检测并穿透弹出的 Turnstile 验证框...", flush=True)
         solve_turnstile_challenge(driver, timeout=30, tag="登录验证")
 
-        # 等待页面跳入后台
         for _ in range(15):
             curr_url = driver.current_url
             if "/login" not in curr_url and BASE_URL in curr_url:
@@ -309,10 +305,10 @@ def main():
 
         print(f"🎉 登录成功！当前页面: {driver.current_url}", flush=True)
 
-        # 第五步：若在 Inicio 页面，点击左侧 Servidores 导航进入服务器列表
+        # 5. 导航至服务器管理页 (Servidores)
         human_sleep(2.0, 3.0)
         if "/servers" not in driver.current_url:
-            print("🚀 [步骤 5] 导航至服务器管理页 (Servidores)...", flush=True)
+            print("🚀 [步骤 5] 导航至服务器列表 (Servidores)...", flush=True)
             serv_links = driver.find_elements(By.XPATH, "//a[contains(@href, 'servers') or contains(., 'Servidores')] | //div[contains(., 'Servidores')]")
             if serv_links:
                 human_click(driver, serv_links[0])
@@ -330,15 +326,14 @@ def main():
         status_before = get_servers_info(driver)
         print(f"📊 当前服务器状态:\n{status_before}", flush=True)
 
-        # 第六步：检索待续期按钮
+        # 6. 检索待续期按钮
         renovar_btn_xpath = "//button[contains(., 'RENOVAR') or contains(., 'Renovar')]"
         renovar_buttons = driver.find_elements(By.XPATH, renovar_btn_xpath)
 
         now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
-        # 若无待续期按钮（满期 7 天无需续期）
         if not renovar_buttons:
-            print("ℹ️ 当前页面未检测到待续期按钮（周期已是上限 7 天，无需续期）。", flush=True)
+            print("ℹ️ 当前页面未检测到待续期按钮（周期已处于上限 7 天，无需续期）。", flush=True)
             driver.save_screenshot("ek_current_status.png")
             tg_send(
                 f"🛡️ <b>EKNodes 自动巡检正常</b>\n\n"
@@ -350,14 +345,13 @@ def main():
             print("✅ 状态已推送到 Telegram。", flush=True)
             return
 
-        # 第七步：点击 RENOVAR 并处理弹窗二次验证
+        # 7. 执行续期并处理弹窗
         renew_success = False
         for idx, btn in enumerate(renovar_buttons):
             print(f"👉 [步骤 7] 正在点击第 {idx+1}/{len(renovar_buttons)} 台服务器的 RENOVAR 按钮...", flush=True)
             human_click(driver, btn)
             human_sleep(2.5, 3.5)
 
-            # 处理弹窗内验证码
             solve_turnstile_challenge(driver, timeout=20, tag="续期确认")
             human_sleep(1.0, 2.0)
 
@@ -371,7 +365,7 @@ def main():
             else:
                 print("  ⚠️ 未找到确认续期按钮或按钮未激活", flush=True)
 
-        # 第八步：刷新获取续期后状态并推送
+        # 8. 刷新获取续期后状态并推送
         driver.refresh()
         human_sleep(4.0, 6.0)
         status_after = get_servers_info(driver)
