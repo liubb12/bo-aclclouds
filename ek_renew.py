@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动登录与服务器续期脚本 (最终稳定版)
+# EKNodes 自动登录、服务器续期与电源巡检脚本 (图文增强版)
 # ============================================================
-import os
-import re
 import html
-import time
+import os
 import random
+import re
 import subprocess
+import time
+from datetime import datetime, timedelta, timezone
 import requests
-from datetime import datetime, timezone, timedelta
 from seleniumbase import Driver
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.action_chains import ActionChains
 
 BASE_URL = "https://dash.eknodes.es"
 LOGIN_URL = f"{BASE_URL}/login"
@@ -39,7 +39,7 @@ def tg_send(text: str, photo_path: str = None):
         print("⚠️ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过通知。")
         return
     try:
-        if photo_path and os.path.exists(photo_path):
+        if photo_path and os.path.exists(photo_path) and os.path.getsize(photo_path) > 1000:
             url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
             with open(photo_path, "rb") as f:
                 resp = requests.post(
@@ -144,7 +144,7 @@ def click_turnstile_checkbox(driver, timeout=30):
             print("  🟢 页面已成功放行！", flush=True)
             return True
 
-        # 方法 1：切入 iframe 物理点击复选框
+        # 切入 iframe 物理点击
         try:
             driver.switch_to.default_content()
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
@@ -162,7 +162,7 @@ def click_turnstile_checkbox(driver, timeout=30):
         except Exception:
             driver.switch_to.default_content()
 
-        # 方法 2：SeleniumBase 原生接口兜底
+        # SeleniumBase 专用 bypass 辅助
         try:
             driver.uc_gui_click_cf()
         except Exception:
@@ -180,8 +180,9 @@ def click_turnstile_checkbox(driver, timeout=30):
 
 
 def get_servers_info(driver):
-    """提取页面上的服务器卡片信息（已修正正则排版）"""
+    """提取页面上的服务器卡片信息及其实例状态"""
     info = []
+    cards_data = []
     try:
         cards = driver.find_elements(By.XPATH, "//div[contains(@class, 'rounded') and (.//button[contains(., 'RENOVAR')] or .//button[contains(., 'GESTIONAR')])]")
         if not cards:
@@ -193,10 +194,52 @@ def get_servers_info(driver):
             exp_date = match.group(1).strip() if match else "未知"
             lines = [l.strip() for l in text.split("\n") if l.strip()]
             name = lines[0] if lines else "Server"
-            info.append(f"• <b>{name}</b>: 到期时间 <code>{exp_date}</code>")
+
+            # 抓取状态标签（如 Instalando、Activo、Detenido 等）
+            status = "ONLINE"
+            if "Instalando" in text:
+                status = "Instalando (安装中)"
+            elif "Inactivo" in text or "Detenido" in text or "Apagado" in text:
+                status = "STOPPED (已停止)"
+            elif "Activo" in text:
+                status = "Activo (运行中)"
+
+            cards_data.append({"name": name, "exp_date": exp_date, "status": status})
+            info.append(f"• <b>{name}</b>: 状态 <code>{status}</code> | 到期 <code>{exp_date}</code>")
     except Exception as e:
         print(f"提取状态异常: {e}")
-    return "\n".join(info) if info else "服务器运行正常"
+
+    summary_str = "\n".join(info) if info else "服务器正常运行"
+    return summary_str, cards_data
+
+
+def check_and_start_if_stopped(driver):
+    """若在控制台卡片中检测到已停止，点击 GESTIONAR 进入控制台尝试开机"""
+    try:
+        cards = driver.find_elements(By.XPATH, "//div[contains(@class, 'rounded') and .//button[contains(., 'GESTIONAR')]]")
+        for c in cards:
+            text = c.text
+            if "Inactivo" in text or "Detenido" in text or "Apagado" in text:
+                print("  ⚡ 检测到服务器停机，点击 GESTIONAR 尝试拉起...", flush=True)
+                btn = c.find_element(By.XPATH, ".//button[contains(., 'GESTIONAR')]")
+                main_w = driver.current_window_handle
+                human_click(driver, btn)
+                time.sleep(5)
+                # 切入新打开的控制台
+                for w in driver.window_handles:
+                    if w != main_w:
+                        driver.switch_to.window(w)
+                        start_btn = driver.find_elements(By.XPATH, "//button[contains(., 'Start') or contains(., 'Iniciar')]")
+                        if start_btn and start_btn[0].is_enabled():
+                            human_click(driver, start_btn[0])
+                            print("  👉 控制台中已点击 Start 开机！", flush=True)
+                            time.sleep(3)
+                        driver.close()
+                driver.switch_to.window(main_w)
+                return "已执行开机"
+    except Exception:
+        pass
+    return "正常运行"
 
 
 def main():
@@ -241,7 +284,6 @@ def main():
             print("🔑 [第一步] 点击 INICIAR SESIÓN 按钮提交...", flush=True)
             human_click(driver, submit_btn)
 
-            # 等待 Turnstile 弹窗并完成验证
             human_sleep(2.0, 3.0)
             print("🛡️ [第二步] 正在处理弹出的 Cloudflare 人机验证...", flush=True)
             click_turnstile_checkbox(driver, timeout=35)
@@ -257,7 +299,7 @@ def main():
 
             print(f"✅ 登录成功！当前 URL: {driver.current_url}", flush=True)
 
-        # 2. 强制访问 /servers 并等待 DOM 加载完毕
+        # 2. 访问 /servers
         print(f"🚀 正在进入服务器管理页面: {SERVERS_URL} ...", flush=True)
         driver.get(SERVERS_URL)
         human_sleep(5.0, 7.0)
@@ -268,35 +310,39 @@ def main():
         except Exception:
             print("  ⚠️ 等待主元素超时，继续尝试检索卡片...", flush=True)
 
-        status_before = get_servers_info(driver)
-        print(f"📊 当前服务器状态:\n{status_before}", flush=True)
+        # 状态提取与电源检测
+        status_before, cards_data = get_servers_info(driver)
+        power_action = check_and_start_if_stopped(driver)
+        print(f"📊 当前服务器状态:\n{status_before}\n⚡ 电源动作: {power_action}", flush=True)
 
-        # 3. 抓取所有待点击的 RENOVAR 按钮
+        # 3. 抓取待续期按钮
         renovar_btn_xpath = "//button[contains(., 'RENOVAR') or contains(., 'Renovar')]"
         renovar_buttons = driver.find_elements(By.XPATH, renovar_btn_xpath)
 
         now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
-        # 若未找到 RENOVAR 按钮（说明周期已满 7 天无需续期）
+        # 若未找到 RENOVAR 按钮（满期 7 天无需续期）
         if not renovar_buttons:
             print("ℹ️ 当前页面未检测到待续期按钮（服务器周期已是满额 7 天）。", flush=True)
             driver.save_screenshot("ek_current_status.png")
             tg_send(
-                f"🛡️ <b>EKNodes 自动巡检正常</b>\n\n"
-                f"当前服务器到期时间充足（无需续期）：\n{status_before}\n\n"
+                f"🛡️ <b>EKNodes 自动巡检报告</b>\n\n"
+                f"🔌 <b>电源操作：</b><code>{power_action}</code>\n"
+                f"📊 <b>当前实例状态：</b>\n{status_before}\n\n"
+                f"⏭️ <b>执行结果：</b><code>周期已达上限，无需续期</code>\n"
                 f"⏰ <b>巡检时间：</b><code>{now_time}</code>",
-                photo_path="ek_current_status.png"
+                photo_path="ek_current_status.png",
             )
             print("✅ 状态正常通知已推送到 Telegram。", flush=True)
             return
 
-        # 4. 逐一执行续期与弹窗内二次验证
+        # 4. 逐一点击续期
         for idx, btn in enumerate(renovar_buttons):
             print(f"👉 正在点击第 {idx+1}/{len(renovar_buttons)} 台服务器的 RENOVAR 按钮...", flush=True)
             human_click(driver, btn)
             human_sleep(3.0, 4.5)
 
-            # 弹窗内验证码
+            # 穿透弹窗内 Turnstile
             print("  🛡️ 检查并处理续期弹窗内 Turnstile 验证码...", flush=True)
             click_turnstile_checkbox(driver, timeout=20)
             human_sleep(1.5, 2.5)
@@ -310,18 +356,19 @@ def main():
             else:
                 print("  ⚠️ 未找到确认续期按钮或按钮未激活", flush=True)
 
-        # 5. 刷新获取最新状态并推送 Telegram
+        # 5. 刷新获取续期后状态并推送
         driver.refresh()
         human_sleep(4.0, 6.0)
-        status_after = get_servers_info(driver)
+        status_after, _ = get_servers_info(driver)
         driver.save_screenshot("ek_final.png")
 
         tg_send(
-            f"🎉 <b>EKNodes 服务器自动续期成功</b>\n\n"
-            f"<b>续期前：</b>\n{status_before}\n\n"
-            f"<b>续期后：</b>\n{status_after}\n\n"
+            f"🎉 <b>EKNodes 服务器续期巡检报告</b>\n\n"
+            f"🔌 <b>电源操作：</b><code>{power_action}</code>\n"
+            f"⏳ <b>续期前状态：</b>\n{status_before}\n\n"
+            f"⌛ <b>续期后状态：</b>\n{status_after}\n\n"
             f"⏰ <b>执行时间：</b><code>{now_time}</code>",
-            photo_path="ek_final.png"
+            photo_path="ek_final.png",
         )
         print("\n🎉 全部操作已顺利完成，已推送到 Telegram！", flush=True)
 
