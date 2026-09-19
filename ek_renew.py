@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动巡检与续期 (纯 API 通道 + 高保真控制台原生卡片)
+# EKNodes 自动巡检与智能续期引擎 (纯 API 巡检 + 临期自动化续期)
 # ============================================================
 import html
+import json
 import os
 import re
 import subprocess
@@ -20,6 +21,11 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 EK_COOKIE = os.environ.get("EK_COOKIE", "").strip()
 SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
+FORCE_RENEW = os.environ.get("FORCE_RENEW", "false").lower() == "true"
+
+# 从 cURL 中逆向提取出的固定核心配置
+SERVER_UUID = "d576fbcf-7842-4e9f-9550-cb8edf1cb78f"
+NEXT_ACTION_ID = "60ed654207ed09cb22b4293e56f9937d89a502d7c8"
 
 
 def tg_send(text: str, photo_path: str = None):
@@ -44,7 +50,7 @@ def tg_send(text: str, photo_path: str = None):
                 timeout=30,
             )
         if resp.status_code == 200:
-            print("  ✅ TG 图文通知发送成功", flush=True)
+            print("  ✅ TG 通知推送成功", flush=True)
         else:
             print(f"  ⚠️ TG 返回码 {resp.status_code}: {resp.text}", flush=True)
     except Exception as e:
@@ -112,37 +118,29 @@ def extract_cookies(raw_input: str) -> dict:
 
 
 def generate_status_image(server_name, status_tag, exp_date, node_ip, output_path="ek_card.png"):
-    """使用西语原生排版生成暗黑控制台卡片，完全杜绝中文乱码豆腐块"""
     width, height = 750, 420
     img = Image.new("RGB", (width, height), color="#0b1120")
     draw = ImageDraw.Draw(img)
 
-    # 卡片外框
     card_box = [35, 30, width - 35, height - 30]
     draw.rounded_rectangle(card_box, radius=16, fill="#111827", outline="#1f2937", width=2)
 
-    # 顶部实例名称
     draw.text((65, 55), server_name, fill="#f9fafb")
 
-    # 右侧状态胶囊
     status_text = "Online" if "Online" in status_tag else "Inactivo"
     badge_bg = "#064e3b" if status_text == "Online" else "#7f1d1d"
     badge_fg = "#34d399" if status_text == "Online" else "#f87171"
     draw.rounded_rectangle([width - 170, 52, width - 65, 82], radius=14, fill=badge_bg)
     draw.text((width - 145, 60), status_text, fill=badge_fg)
 
-    # 分割线
     draw.line([(65, 105), (width - 65, 105)], fill="#1f2937", width=1)
 
-    # IP 地址
     draw.text((65, 130), "IP / PUERTO", fill="#6b7280")
     draw.text((220, 130), str(node_ip), fill="#e5e7eb")
 
-    # 到期时间
     draw.text((65, 175), "EXPIRACION", fill="#6b7280")
     draw.text((220, 175), str(exp_date), fill="#38bdf8")
 
-    # 硬件指标 (CPU, RAM, DISCO)
     metrics = [("CPU", "100%"), ("RAM", "2.0 GB"), ("DISCO", "4.0 GB")]
     box_w = 185
     start_x = 65
@@ -152,7 +150,6 @@ def generate_status_image(server_name, status_tag, exp_date, node_ip, output_pat
         draw.text((x + 18, 238), label, fill="#9ca3af")
         draw.text((x + 18, 262), val, fill="#f3f4f6")
 
-    # 底部按键
     draw.rounded_rectangle([65, 320, 255, 362], radius=8, fill="#10b981")
     draw.text((105, 332), "GESTIONAR", fill="#ffffff")
 
@@ -163,9 +160,95 @@ def generate_status_image(server_name, status_tag, exp_date, node_ip, output_pat
     return output_path
 
 
+def parse_days_remaining(exp_date_str: str) -> int:
+    """计算当前到到期日期的剩余天数"""
+    months = {
+        "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+        "jul": 7, "ago": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dic": 12
+    }
+    m = re.search(r'([0-9]{1,2})\s+([a-zA-Z]+)\s+([0-9]{4})', exp_date_str)
+    if not m:
+        return 7
+    day = int(m.group(1))
+    mon_str = m.group(2).lower()
+    year = int(m.group(3))
+    mon = months.get(mon_str, 9)
+    try:
+        exp_dt = datetime(year, mon, day, tzinfo=timezone.utc)
+        now_dt = datetime.now(timezone.utc)
+        diff = (exp_dt - now_dt).days
+        return max(diff, 0)
+    except Exception:
+        return 7
+
+
+def perform_browser_renew():
+    """当触发可续期条件时，调用 SeleniumBase 穿透 Turnstile 并提交 Action"""
+    from seleniumbase import Driver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    print("⚡ 启动浏览器进行真实 Turnstile 交互续期...", flush=True)
+    uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}" if SOCKS5_PROXY else None
+    driver = Driver(uc=True, headless=False, proxy=uc_proxy, uc_subprocess=True)
+
+    try:
+        driver.uc_open_with_reconnect(BASE_URL, reconnect_time=4)
+        time.sleep(2)
+
+        # 注入 Cookie
+        cookies_dict = extract_cookies(EK_COOKIE)
+        for k, v in cookies_dict.items():
+            try:
+                driver.add_cookie({"name": k, "value": v, "domain": "dash.eknodes.es", "path": "/"})
+            except Exception:
+                try:
+                    driver.add_cookie({"name": k, "value": v, "path": "/"})
+                except Exception:
+                    pass
+
+        driver.get(SERVERS_URL)
+        time.sleep(5)
+
+        renovar_xpath = "//button[contains(., 'RENOVAR') or .//text()[contains(., 'RENOVAR')]]"
+        btns = driver.find_elements(By.XPATH, renovar_xpath)
+        if not btns:
+            return False, "未找到待续期按钮"
+
+        btns[0].click()
+        time.sleep(3)
+
+        # 穿透 Turnstile 验证框
+        print("  🛡️ 穿透模态框 Turnstile...", flush=True)
+        start_t = time.time()
+        verified = False
+        while time.time() - start_t < 25:
+            confirm = driver.find_elements(By.XPATH, "//button[contains(., 'CONFIRMAR RENOVACIÓN') or contains(., 'Confirmar')]")
+            if confirm and not confirm[0].get_attribute("disabled"):
+                verified = True
+                break
+            try:
+                driver.uc_gui_click_cf()
+            except Exception:
+                pass
+            time.sleep(2)
+
+        confirm_btn = driver.find_elements(By.XPATH, "//button[contains(., 'CONFIRMAR RENOVACIÓN') or contains(., 'Confirmar')]")
+        if confirm_btn and not confirm_btn[0].get_attribute("disabled"):
+            confirm_btn[0].click()
+            time.sleep(5)
+            return True, "已成功提交续期"
+        else:
+            return False, "未能成功点亮确认按钮"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        driver.quit()
+
+
 def main():
     print("=" * 45, flush=True)
-    print(" EKNodes 自动巡检与续期 (纯 API 通道)", flush=True)
+    print(" EKNodes 自动巡检与续期调度", flush=True)
     print("=" * 45, flush=True)
 
     if not EK_COOKIE:
@@ -203,11 +286,11 @@ def main():
     now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
     try:
-        print("🌐 正在通过 API 请求服务器列表数据...", flush=True)
+        print("🌐 正在通过 API 获取服务器列表数据...", flush=True)
         resp = session.get(SERVERS_URL, timeout=20)
 
         if "Failed to verify your browser" in resp.text:
-            raise RuntimeError("凭据失效触发 WAF，请更新 Secrets 中的 EK_COOKIE。")
+            raise RuntimeError("Cookie 凭据失效触发 WAF，请更新 Secrets 中的 EK_COOKIE。")
 
         html_text = resp.text
 
@@ -235,23 +318,31 @@ def main():
         elif any(k in html_text for k in ("Inactivo", "Detenido", "Apagado")):
             status_tag = "Offline"
 
-        server_info = f"• <b>{server_name}</b>: 状态 <code>{status_tag}</code> | 到期 <code>{exp_date}</code>"
+        days_left = parse_days_remaining(exp_date)
+        server_info = f"• <b>{server_name}</b>: 状态 <code>{status_tag}</code> | 到期 <code>{exp_date}</code> (剩 <b>{days_left}</b> 天)"
         print(f"📊 提取到的真实数据:\n{server_info}\n🌐 地址: {node_ip}", flush=True)
 
-        # 5. 动态生成干净的卡片图
         card_img_path = generate_status_image(server_name, status_tag, exp_date, node_ip)
-        print(f"🎨 已绘制无乱码控制台卡片: {card_img_path}", flush=True)
+
+        # 5. 核心调度：剩余周期 > 3 天且未指定强制续期时跳过点击
+        if days_left > 3 and not FORCE_RENEW:
+            print(f"ℹ️ 剩余天数（{days_left} 天）充裕，无需执行续期。", flush=True)
+            result_tag = f"周期充足 ({days_left}天)，无需续期"
+        else:
+            print(f"⚡ 剩余天数（{days_left} 天）已进入可续期区间，触发续期流程...", flush=True)
+            ok, msg = perform_browser_renew()
+            result_tag = "✅ 续期完成 (+7天)" if ok else f"⚠️ 续期动作反馈: {msg}"
 
         # 6. 推送图文通知
         tg_send(
-            f"🛡️ <b>EKNodes 服务器巡检报告 (API 通道)</b>\n\n"
+            f"🛡️ <b>EKNodes 服务器巡检与续期报告</b>\n\n"
             f"📊 <b>实例状态：</b>\n{server_info}\n\n"
             f"🌐 <b>连接地址：</b><code>{node_ip}</code>\n"
-            f"⏭️ <b>执行结果：</b><code>周期已满 7 天 (无需续期)</code>\n"
+            f"⏭️ <b>执行结果：</b><code>{result_tag}</code>\n"
             f"⏰ <b>巡检时间：</b><code>{now_time}</code>",
             photo_path=card_img_path
         )
-        print("🎉 巡检完成，图文报告已推送至 Telegram！", flush=True)
+        print("🎉 流程全部完成，通知已推送到 Telegram！", flush=True)
 
     except Exception as e:
         err = str(e)
