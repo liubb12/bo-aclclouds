@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动登录与续期脚本 (多窗口自适应与人机穿透修复版)
+# EKNodes 自动登录与续期 (终极版：智能 cURL 解析穿透 + 拟真回退)
 # ============================================================
 import html
 import os
@@ -25,6 +25,7 @@ LOCAL_HTTP_PORT = 18080
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 
+EK_COOKIE = os.environ.get("EK_COOKIE", "").strip()
 EK_EMAIL = os.environ.get("EK_EMAIL", "").strip()
 EK_USERNAME = os.environ.get("EK_USERNAME", "").strip()
 EK_PASSWORD = os.environ.get("EK_PASSWORD", "").strip()
@@ -137,7 +138,6 @@ def human_click(driver, element):
 
 
 def solve_turnstile_challenge(driver, timeout=35, tag="Turnstile"):
-    """穿透 Cloudflare Turnstile 复选框"""
     print(f"  🛡️ 正在检测并处理 [{tag}] 验证框...", flush=True)
     start = time.time()
     while time.time() - start < timeout:
@@ -212,16 +212,45 @@ def get_servers_info(driver):
     return "\n".join(info) if info else "服务器正常运行"
 
 
+def smart_inject_cookies(driver, raw_input: str):
+    """智能解析 cURL 或纯字符串，提取有效 Cookie 并注入"""
+    if not raw_input:
+        return 0
+    
+    cookie_str = raw_input
+    # 正则提取 cURL 中的 -H 'cookie: xxx' 或 -b 'xxx'
+    match_h = re.search(r"(?i)-H\s+['\"]cookie:\s*(.*?)['\"]", raw_input)
+    if match_h:
+        cookie_str = match_h.group(1)
+    else:
+        match_b = re.search(r"(?i)-b\s+['\"](.*?)['\"]", raw_input)
+        if match_b:
+            cookie_str = match_b.group(1)
+
+    cookies_list = []
+    for pair in cookie_str.split(";"):
+        pair = pair.strip()
+        if not pair or "=" not in pair:
+            continue
+        k, v = pair.split("=", 1)
+        cookies_list.append((k.strip(), v.strip()))
+
+    injected = 0
+    for name, value in cookies_list:
+        try:
+            driver.add_cookie({"name": name, "value": value, "domain": ".eknodes.es", "path": "/"})
+            injected += 1
+        except Exception:
+            pass
+    return injected
+
+
 def main():
     print("=" * 45, flush=True)
-    print(" EKNodes 自动登录与续期任务启动", flush=True)
+    print(" EKNodes 自动登录与续期任务 (智能穿透版)", flush=True)
     print("=" * 45, flush=True)
 
     login_account = EK_EMAIL if EK_EMAIL else EK_USERNAME
-    if not login_account or not EK_PASSWORD:
-        print("❌ 未在 Secrets 中配置账号 (EK_EMAIL) 或密码 (EK_PASSWORD)！", flush=True)
-        return
-
     gost_proc = None
     uc_proxy = None
 
@@ -233,82 +262,98 @@ def main():
         except Exception as e:
             print(f"⚠️ 代理启动失败：{e}，尝试直连模式。", flush=True)
 
-    driver = Driver(
-        uc=True,
-        headless=False,
-        proxy=uc_proxy,
-        uc_subprocess=True,
-    )
+    driver = Driver(uc=True, headless=False, proxy=uc_proxy, uc_subprocess=True)
 
     try:
-        # 1. 访问主站入口建立可信连接
-        print(f"🌐 [步骤 1] 访问主站入口: {ROOT_URL} ...", flush=True)
+        # 第一步：访问主站入口建立域环境
+        print(f"🌐 [步骤 1] 访问主站入口建立域环境: {ROOT_URL} ...", flush=True)
         driver.uc_open_with_reconnect(ROOT_URL, reconnect_time=4)
         human_sleep(2.0, 3.5)
 
-        main_win = driver.current_window_handle
-        panel_btns = driver.find_elements(By.XPATH, "//a[contains(., 'Panel')] | //button[contains(., 'Panel')]")
-        if panel_btns:
-            print("  👉 点击主站右上角 [Panel] 按钮跳转...", flush=True)
-            human_click(driver, panel_btns[0])
-            human_sleep(3.0, 5.0)
+        is_logged_in = False
 
-            # 关键：切换到新弹出的控制台标签页
-            for handle in driver.window_handles:
-                if handle != main_win:
-                    driver.switch_to.window(handle)
+        # 优先尝试 Cookie 智能注入直登
+        if EK_COOKIE:
+            print("🍪 [步骤 2] 检测到配置了 EK_COOKIE，尝试全量注入免密直登...", flush=True)
+            injected_count = smart_inject_cookies(driver, EK_COOKIE)
+            print(f"  ✅ 成功提取并注入了 {injected_count} 个关键 Cookie 凭证！", flush=True)
+            
+            driver.get(SERVERS_URL)
+            human_sleep(4.0, 6.0)
+
+            if "/login" not in driver.current_url and BASE_URL in driver.current_url:
+                print("🎉 Cookie 穿透大成功！直接进入后台！", flush=True)
+                is_logged_in = True
+            else:
+                print("⚠️ Cookie 已过期或未能放行，自动回退到拟真账号密码登录...", flush=True)
+        
+        # 若 Cookie 过期或未配置，执行拟真回退流程
+        if not is_logged_in:
+            if not login_account or not EK_PASSWORD:
+                raise RuntimeError("未配置有效的 EK_COOKIE，且缺少账号或密码，无法继续。")
+
+            print("🔄 [回退流程] 模拟人类点击流程...", flush=True)
+            driver.get(ROOT_URL)
+            human_sleep(2.0, 3.0)
+
+            main_win = driver.current_window_handle
+            panel_btns = driver.find_elements(By.XPATH, "//a[contains(., 'Panel')] | //button[contains(., 'Panel')]")
+            if panel_btns:
+                print("  👉 点击主站右上角 [Panel] 按钮跳转...", flush=True)
+                human_click(driver, panel_btns[0])
+                human_sleep(3.0, 5.0)
+
+                # 关键：切换到新弹出的控制台标签页
+                for handle in driver.window_handles:
+                    if handle != main_win:
+                        driver.switch_to.window(handle)
+                        break
+            else:
+                driver.get(LOGIN_URL)
+                human_sleep(3.0, 5.0)
+
+            if "dash.eknodes.es" not in driver.current_url:
+                driver.get(LOGIN_URL)
+                human_sleep(3.0, 5.0)
+
+            print("📝 [回退流程] 等待登录表单加载...", flush=True)
+            input_xpath = "//input[@type='email' or @type='text' or contains(@placeholder, 'CORREO') or contains(@placeholder, 'email')]"
+            email_elem = driver.wait_for_element_visible(input_xpath, timeout=30)
+
+            masked_acc = login_account[:3] + "***" if len(login_account) > 3 else "***"
+            print(f"  ✍️ 填入邮箱账号: {masked_acc}", flush=True)
+            human_type(driver, email_elem, login_account)
+            human_sleep(0.5, 0.8)
+
+            pwd_elem = driver.wait_for_element_visible("//input[@type='password']", timeout=15)
+            print("  ✍️ 填入登录密码...", flush=True)
+            human_type(driver, pwd_elem, EK_PASSWORD)
+            human_sleep(0.6, 1.2)
+
+            submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'INICIAR SESIÓN') or contains(., 'Iniciar')]")
+            print("🔑 [回退流程] 点击 INICIAR SESIÓN 提交...", flush=True)
+            human_click(driver, submit_btn)
+
+            human_sleep(2.5, 3.5)
+            print("🛡️ [回退流程] 检测并穿透弹出的 Turnstile 验证框...", flush=True)
+            solve_turnstile_challenge(driver, timeout=30, tag="登录验证")
+
+            for _ in range(15):
+                curr_url = driver.current_url
+                if "/login" not in curr_url and BASE_URL in curr_url:
                     break
-        else:
-            driver.get(LOGIN_URL)
-            human_sleep(3.0, 5.0)
+                time.sleep(1)
 
-        # 确保当前窗口处在 dash.eknodes.es
-        if "dash.eknodes.es" not in driver.current_url:
-            print("  🌐 导航至登录界面...", flush=True)
-            driver.get(LOGIN_URL)
-            human_sleep(3.0, 5.0)
+            if "/login" in driver.current_url:
+                driver.save_screenshot("ek_login_fail.png")
+                raise RuntimeError("回退登录失败，未能进入后台。")
 
-        # 2. 定位并填入账号密码
-        print("📝 [步骤 2] 等待登录表单加载...", flush=True)
-        input_xpath = "//input[@type='email' or @type='text' or contains(@placeholder, 'CORREO') or contains(@placeholder, 'email')]"
-        email_elem = driver.wait_for_element_visible(input_xpath, timeout=30)
+            print(f"🎉 回退登录成功！当前页面: {driver.current_url}", flush=True)
 
-        masked_acc = login_account[:3] + "***" if len(login_account) > 3 else "***"
-        print(f"  ✍️ 填入邮箱账号: {masked_acc}", flush=True)
-        human_type(driver, email_elem, login_account)
-        human_sleep(0.5, 0.8)
-
-        pwd_elem = driver.wait_for_element_visible("//input[@type='password']", timeout=15)
-        print("  ✍️ 填入登录密码...", flush=True)
-        human_type(driver, pwd_elem, EK_PASSWORD)
-        human_sleep(0.6, 1.2)
-
-        # 3. 提交登录表单
-        submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'INICIAR SESIÓN') or contains(., 'Iniciar')]")
-        print("🔑 [步骤 3] 点击 INICIAR SESIÓN 提交...", flush=True)
-        human_click(driver, submit_btn)
-
-        # 4. 穿透提交后弹出的 Turnstile 验证框
-        human_sleep(2.5, 3.5)
-        print("🛡️ [步骤 4] 检测并穿透弹出的 Turnstile 验证框...", flush=True)
-        solve_turnstile_challenge(driver, timeout=30, tag="登录验证")
-
-        for _ in range(15):
-            curr_url = driver.current_url
-            if "/login" not in curr_url and BASE_URL in curr_url:
-                break
-            time.sleep(1)
-
-        if "/login" in driver.current_url:
-            driver.save_screenshot("ek_login_fail.png")
-            raise RuntimeError("登录后未成功进入后台，请检查凭据或人机验证。")
-
-        print(f"🎉 登录成功！当前页面: {driver.current_url}", flush=True)
-
-        # 5. 导航至服务器管理页 (Servidores)
+        # 共同流程：确保到达 /servers 进行续期
         human_sleep(2.0, 3.0)
         if "/servers" not in driver.current_url:
-            print("🚀 [步骤 5] 导航至服务器列表 (Servidores)...", flush=True)
+            print("🚀 导航至服务器列表 (Servidores)...", flush=True)
             serv_links = driver.find_elements(By.XPATH, "//a[contains(@href, 'servers') or contains(., 'Servidores')] | //div[contains(., 'Servidores')]")
             if serv_links:
                 human_click(driver, serv_links[0])
@@ -326,14 +371,13 @@ def main():
         status_before = get_servers_info(driver)
         print(f"📊 当前服务器状态:\n{status_before}", flush=True)
 
-        # 6. 检索待续期按钮
         renovar_btn_xpath = "//button[contains(., 'RENOVAR') or contains(., 'Renovar')]"
         renovar_buttons = driver.find_elements(By.XPATH, renovar_btn_xpath)
 
         now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
         if not renovar_buttons:
-            print("ℹ️ 当前页面未检测到待续期按钮（周期已处于上限 7 天，无需续期）。", flush=True)
+            print("ℹ️ 当前页面未检测到待续期按钮（周期已处于上限，无需续期）。", flush=True)
             driver.save_screenshot("ek_current_status.png")
             tg_send(
                 f"🛡️ <b>EKNodes 自动巡检正常</b>\n\n"
@@ -345,10 +389,9 @@ def main():
             print("✅ 状态已推送到 Telegram。", flush=True)
             return
 
-        # 7. 执行续期并处理弹窗
         renew_success = False
         for idx, btn in enumerate(renovar_buttons):
-            print(f"👉 [步骤 7] 正在点击第 {idx+1}/{len(renovar_buttons)} 台服务器的 RENOVAR 按钮...", flush=True)
+            print(f"👉 正在点击第 {idx+1}/{len(renovar_buttons)} 台服务器的 RENOVAR 按钮...", flush=True)
             human_click(driver, btn)
             human_sleep(2.5, 3.5)
 
@@ -365,7 +408,6 @@ def main():
             else:
                 print("  ⚠️ 未找到确认续期按钮或按钮未激活", flush=True)
 
-        # 8. 刷新获取续期后状态并推送
         driver.refresh()
         human_sleep(4.0, 6.0)
         status_after = get_servers_info(driver)
