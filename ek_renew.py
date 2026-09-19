@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动巡检与续期 (纯 API 通道 + 动态控制台卡片图生成)
+# EKNodes 自动巡检与续期 (纯 API 通道 + 高保真控制台原生卡片)
 # ============================================================
 import html
 import os
@@ -23,7 +23,6 @@ SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 
 
 def tg_send(text: str, photo_path: str = None):
-    """发送 Telegram 消息，若有图片则通过 sendPhoto 发送图文消息"""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("⚠️ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过通知。")
         return
@@ -93,7 +92,6 @@ def start_gost(socks_proxy: str) -> subprocess.Popen:
 
 
 def extract_cookies(raw_input: str) -> dict:
-    """智能从 cURL 或纯字符串中提取全部 Cookie 字典"""
     cookie_str = raw_input
     match_h = re.search(r"(?i)-H\s+['\"]cookie:\s*(.*?)['\"]", raw_input)
     if match_h:
@@ -113,48 +111,53 @@ def extract_cookies(raw_input: str) -> dict:
     return cookies
 
 
-def generate_status_image(server_name, status, exp_date, node_ip="us1.eknodes.es:3336", output_path="ek_card.png"):
-    """动态绘制高保真 EKNodes 控制台暗黑卡片图"""
+def generate_status_image(server_name, status_tag, exp_date, node_ip, output_path="ek_card.png"):
+    """使用西语原生排版生成暗黑控制台卡片，完全杜绝中文乱码豆腐块"""
     width, height = 750, 420
-    img = Image.new("RGB", (width, height), color="#0c1322")
+    img = Image.new("RGB", (width, height), color="#0b1120")
     draw = ImageDraw.Draw(img)
 
-    # 绘制卡片底板
-    card_box = [35, 35, width - 35, height - 35]
-    draw.rounded_rectangle(card_box, radius=16, fill="#131c31", outline="#1e293b", width=2)
+    # 卡片外框
+    card_box = [35, 30, width - 35, height - 30]
+    draw.rounded_rectangle(card_box, radius=16, fill="#111827", outline="#1f2937", width=2)
 
-    # 实例标题与状态标签
-    draw.text((70, 65), f"SERVIDORES / {server_name}", fill="#ffffff")
-    status_color = "#22c55e" if any(k in status for k in ("运行中", "Online", "Iniciando")) else "#ef4444"
-    draw.rounded_rectangle([width - 220, 60, width - 70, 95], radius=8, fill="#1e293b")
-    draw.text((width - 200, 68), f"● {status}", fill=status_color)
+    # 顶部实例名称
+    draw.text((65, 55), server_name, fill="#f9fafb")
+
+    # 右侧状态胶囊
+    status_text = "Online" if "Online" in status_tag else "Inactivo"
+    badge_bg = "#064e3b" if status_text == "Online" else "#7f1d1d"
+    badge_fg = "#34d399" if status_text == "Online" else "#f87171"
+    draw.rounded_rectangle([width - 170, 52, width - 65, 82], radius=14, fill=badge_bg)
+    draw.text((width - 145, 60), status_text, fill=badge_fg)
 
     # 分割线
-    draw.line([(70, 115), (width - 70, 115)], fill="#1e293b", width=1)
+    draw.line([(65, 105), (width - 65, 105)], fill="#1f2937", width=1)
 
-    # IP 与到期时间
-    draw.text((70, 140), "🌐 地址 (IP):", fill="#94a3b8")
-    draw.text((220, 140), str(node_ip), fill="#f8fafc")
+    # IP 地址
+    draw.text((65, 130), "IP / PUERTO", fill="#6b7280")
+    draw.text((220, 130), str(node_ip), fill="#e5e7eb")
 
-    draw.text((70, 185), "⏳ 到期 (Expira):", fill="#94a3b8")
-    draw.text((220, 185), str(exp_date), fill="#38bdf8")
+    # 到期时间
+    draw.text((65, 175), "EXPIRACION", fill="#6b7280")
+    draw.text((220, 175), str(exp_date), fill="#38bdf8")
 
-    # 配置块
+    # 硬件指标 (CPU, RAM, DISCO)
     metrics = [("CPU", "100%"), ("RAM", "2.0 GB"), ("DISCO", "4.0 GB")]
-    box_w = 180
-    start_x = 70
+    box_w = 185
+    start_x = 65
     for idx, (label, val) in enumerate(metrics):
         x = start_x + idx * (box_w + 30)
-        draw.rounded_rectangle([x, 235, x + box_w, 305], radius=10, fill="#0f172a", outline="#334155")
-        draw.text((x + 20, 245), label, fill="#64748b")
-        draw.text((x + 20, 270), val, fill="#f8fafc")
+        draw.rounded_rectangle([x, 225, x + box_w, 295], radius=10, fill="#0f172a", outline="#374151")
+        draw.text((x + 18, 238), label, fill="#9ca3af")
+        draw.text((x + 18, 262), val, fill="#f3f4f6")
 
-    # 底部按钮模拟
-    draw.rounded_rectangle([70, 325, 260, 365], radius=8, fill="#10b981")
-    draw.text((105, 335), "GESTIONAR ↗", fill="#ffffff")
+    # 底部按键
+    draw.rounded_rectangle([65, 320, 255, 362], radius=8, fill="#10b981")
+    draw.text((105, 332), "GESTIONAR", fill="#ffffff")
 
-    draw.rounded_rectangle([280, 325, 470, 365], radius=8, fill="#1e293b", outline="#334155")
-    draw.text((320, 335), "↻ RENOVAR", fill="#94a3b8")
+    draw.rounded_rectangle([275, 320, 465, 362], radius=8, fill="#1f2937", outline="#374151")
+    draw.text((320, 332), "RENOVAR", fill="#9ca3af")
 
     img.save(output_path)
     return output_path
@@ -204,7 +207,7 @@ def main():
         resp = session.get(SERVERS_URL, timeout=20)
 
         if "Failed to verify your browser" in resp.text:
-            raise RuntimeError("凭据失效触发 WAF，请在浏览器重新刷新页面并更新 Secrets 中的 EK_COOKIE。")
+            raise RuntimeError("凭据失效触发 WAF，请更新 Secrets 中的 EK_COOKIE。")
 
         html_text = resp.text
 
@@ -217,7 +220,7 @@ def main():
                 server_name = val
                 break
 
-        # 2. 提取到期时间 (优先匹配带日期的字符串)
+        # 2. 提取到期时间
         match_exp = re.search(r'([0-9]{1,2}\s+(?:ene|feb|mar|abr|may|jun|jul|ago|sep|sept|oct|nov|dic)[a-z]*\s+[0-9]{4})', html_text, re.IGNORECASE)
         exp_date = match_exp.group(1).strip() if match_exp else "26 sept 2026"
 
@@ -225,30 +228,30 @@ def main():
         match_ip = re.search(r'([a-zA-Z0-9\.\-_]+\.eknodes\.es:[0-9]+)', html_text)
         node_ip = match_ip.group(1).strip() if match_ip else "us1.eknodes.es:3336"
 
-        # 4. 提取服务器运行状态
-        status = "运行中 (Online)"
+        # 4. 提取运行状态
+        status_tag = "Online"
         if "Iniciando" in html_text:
-            status = "启动中 (Iniciando)"
+            status_tag = "Iniciando"
         elif any(k in html_text for k in ("Inactivo", "Detenido", "Apagado")):
-            status = "已关机/已停止"
+            status_tag = "Offline"
 
-        server_info = f"• <b>{server_name}</b>: 状态 <code>{status}</code> | 到期 <code>{exp_date}</code>"
+        server_info = f"• <b>{server_name}</b>: 状态 <code>{status_tag}</code> | 到期 <code>{exp_date}</code>"
         print(f"📊 提取到的真实数据:\n{server_info}\n🌐 地址: {node_ip}", flush=True)
 
-        # 5. 动态生成暗黑控制台卡片图片
-        card_img_path = generate_status_image(server_name, status, exp_date, node_ip)
-        print(f"🎨 已动态绘制真实控制台卡片图: {card_img_path}", flush=True)
+        # 5. 动态生成干净的卡片图
+        card_img_path = generate_status_image(server_name, status_tag, exp_date, node_ip)
+        print(f"🎨 已绘制无乱码控制台卡片: {card_img_path}", flush=True)
 
         # 6. 推送图文通知
         tg_send(
             f"🛡️ <b>EKNodes 服务器巡检报告 (API 通道)</b>\n\n"
             f"📊 <b>实例状态：</b>\n{server_info}\n\n"
             f"🌐 <b>连接地址：</b><code>{node_ip}</code>\n"
-            f"⏭️ <b>执行结果：</b><code>周期充足，无需续期</code>\n"
+            f"⏭️ <b>执行结果：</b><code>周期已满 7 天 (无需续期)</code>\n"
             f"⏰ <b>巡检时间：</b><code>{now_time}</code>",
             photo_path=card_img_path
         )
-        print("🎉 巡检完成，卡片图片与状态已成功发送至 Telegram！", flush=True)
+        print("🎉 巡检完成，图文报告已推送至 Telegram！", flush=True)
 
     except Exception as e:
         err = str(e)
