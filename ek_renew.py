@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动登录与续期脚本 (账号密码直接登录·穿透加强版)
+# EKNodes 自动登录与续期脚本 (精准穿透登录后 Turnstile 版)
 # ============================================================
 import html
 import os
@@ -135,15 +135,26 @@ def human_click(driver, element):
         driver.execute_script("arguments[0].click();", element)
 
 
-def bypass_cf_turnstile(driver, timeout=30):
-    """穿透 Turnstile / Vercel 验证"""
+def solve_turnstile(driver, timeout=35, context_desc="验证码"):
+    """专为穿透 Cloudflare Turnstile 复选框设计的稳健点击器"""
+    print(f"  🛡️ 正在检测并穿透 [{context_desc}] ...", flush=True)
     start = time.time()
+    clicked = False
+
     while time.time() - start < timeout:
-        # 如果已经成功跳转到控制台或主页
-        if "/servers" in driver.current_url:
+        # 如果是登录场景且已经成功离开登录页
+        if context_desc == "登录验证" and "/servers" in driver.current_url:
+            print("  🟢 检测到已成功跳转到控制台！", flush=True)
             return True
 
-        # 尝试 SeleniumBase 原生 GUI 点击（最有效防封）
+        # 如果是续期弹窗场景且确认按钮已亮起
+        if context_desc == "续期弹窗验证":
+            confirm_btn = driver.find_elements(By.XPATH, "//button[contains(., 'CONFIRMAR') or contains(., 'Confirmar')]")
+            if confirm_btn and confirm_btn[0].is_enabled():
+                print("  🟢 确认续期按钮已激活就绪！", flush=True)
+                return True
+
+        # 1. 尝试 SeleniumBase 内置专门接口
         try:
             driver.uc_gui_click_cf()
         except Exception:
@@ -152,30 +163,31 @@ def bypass_cf_turnstile(driver, timeout=30):
             except Exception:
                 pass
 
-        # 物理寻找复选框 iframe
+        # 2. 物理定位 Turnstile iframe 并精确点击 checkbox
         try:
             driver.switch_to.default_content()
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             for f in iframes:
                 src = f.get_attribute("src") or ""
+                # 命中 cloudflare / turnstile 相关的挑战 iframe
                 if any(k in src for k in ("cloudflare", "turnstile", "challenges")):
                     driver.switch_to.frame(f)
-                    boxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox'], #checkbox, .ctp-checkbox-label")
+                    time.sleep(0.5)
+                    # 匹配 checkbox 或其包裹标签
+                    boxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox'], #checkbox, .ctp-checkbox-label, body")
                     if boxes:
-                        ActionChains(driver).move_to_element(boxes[0]).pause(0.2).click().perform()
-                        print("  🎯 成功点击人机验证复选框！", flush=True)
+                        target = boxes[0]
+                        ActionChains(driver).move_to_element(target).pause(0.2).click().perform()
+                        print(f"  🎯 成功定位并物理点击了 Turnstile 复选框！", flush=True)
+                        clicked = True
                     driver.switch_to.default_content()
                     break
         except Exception:
             driver.switch_to.default_content()
 
         time.sleep(2)
-        # 弹窗内的确认按钮是否点亮
-        confirm_btn = driver.find_elements(By.XPATH, "//button[contains(., 'CONFIRMAR') or contains(., 'Confirmar')]")
-        if confirm_btn and confirm_btn[0].is_enabled():
-            return True
 
-    return False
+    return clicked
 
 
 def get_servers_info(driver):
@@ -229,7 +241,6 @@ def main():
         except Exception as e:
             print(f"⚠️ 代理启动失败：{e}，尝试直连模式。", flush=True)
 
-    # 关键参数：禁用无头检测标记，设定标准全高清屏幕
     driver = Driver(
         uc=True,
         headless=False,
@@ -238,23 +249,13 @@ def main():
     )
 
     try:
-        # 1. 访问登录页（带防盾重连机制）
+        # 1. 访问登录页
         print(f"🌐 正在访问登录页: {LOGIN_URL} ...", flush=True)
-        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=6)
+        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
         human_sleep(3.0, 5.0)
 
-        # 检查是否遇到 Vercel 拦截屏，若有则原地穿透
-        body_text = driver.get_text("body")
-        if "Failed to verify your browser" in body_text or "Vercel Security Checkpoint" in body_text:
-            print("  🛡️ 触发 Vercel 安全验证，正在穿透...", flush=True)
-            try:
-                driver.uc_gui_click_cf()
-            except Exception:
-                pass
-            human_sleep(4.0, 6.0)
-
         # 2. 定位邮箱与密码输入框
-        print("📝 等待登录表单渲染...", flush=True)
+        print("📝 等待登录表单加载...", flush=True)
         input_xpath = "//input[@type='email' or @type='text' or contains(@placeholder, 'CORREO') or contains(@placeholder, 'email')]"
         email_elem = driver.wait_for_element_visible(input_xpath, timeout=30)
 
@@ -268,17 +269,16 @@ def main():
         human_type(driver, pwd_elem, EK_PASSWORD)
         human_sleep(0.6, 1.2)
 
-        # 点击 INICIAR SESIÓN
+        # 点击 INICIAR SESIÓN 提交表单
         submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., 'INICIAR SESIÓN') or contains(., 'Iniciar')]")
         print("🔑 点击 INICIAR SESIÓN 按钮提交...", flush=True)
         human_click(driver, submit_btn)
 
-        human_sleep(3.0, 4.5)
+        # 3. 关键：等待并解决点击提交后弹出的 Turnstile 验证框
+        human_sleep(2.5, 3.5)
+        solve_turnstile(driver, timeout=30, context_desc="登录验证")
 
-        # 处理登录后的 Turnstile 验证（如果有）
-        bypass_cf_turnstile(driver, timeout=20)
-
-        # 等待页面跳离 /login
+        # 轮询等待跳转
         for _ in range(15):
             if "/login" not in driver.current_url:
                 break
@@ -286,13 +286,13 @@ def main():
 
         if "/login" in driver.current_url:
             driver.save_screenshot("ek_login_fail.png")
-            raise RuntimeError("登录后未成功跳转，请确认账号密码是否正确")
+            raise RuntimeError("登录后未能成功放行跳转，请确认验证码穿透状态。")
 
-        print(f"🎉 账号密码登录成功！当前页面: {driver.current_url}", flush=True)
+        print(f"🎉 登录成功！当前 URL: {driver.current_url}", flush=True)
 
-        # 3. 访问服务器页面 /servers
+        # 4. 确保在 /servers 页面
         if "/servers" not in driver.current_url:
-            print("🚀 跳转至服务器列表...", flush=True)
+            print("🚀 跳转至服务器列表 /servers ...", flush=True)
             driver.get(SERVERS_URL)
             human_sleep(4.0, 6.0)
 
@@ -305,36 +305,36 @@ def main():
         status_before = get_servers_info(driver)
         print(f"📊 当前服务器状态:\n{status_before}", flush=True)
 
-        # 4. 检索待续期按钮
+        # 5. 检索待续期按钮
         renovar_btn_xpath = "//button[contains(., 'RENOVAR') or contains(., 'Renovar')]"
         renovar_buttons = driver.find_elements(By.XPATH, renovar_btn_xpath)
 
         now_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
-        # 若当前已满期 7 天，无需续期
+        # 若当前无待续期按钮（已是满期 7 天）
         if not renovar_buttons:
-            print("ℹ️ 当前页面未检测到待续期按钮（周期充足）。", flush=True)
+            print("ℹ️ 当前页面未检测到待续期按钮（周期已满 7 天无需续期）。", flush=True)
             driver.save_screenshot("ek_current_status.png")
             tg_send(
                 f"🛡️ <b>EKNodes 自动巡检正常</b>\n\n"
                 f"📊 <b>实例状态：</b>\n{status_before}\n\n"
-                f"⏭️ <b>执行结果：</b><code>当前周期充足，无需续期</code>\n"
+                f"⏭️ <b>执行结果：</b><code>周期已达上限，无需续期</code>\n"
                 f"⏰ <b>巡检时间：</b><code>{now_time}</code>",
                 photo_path="ek_current_status.png"
             )
             print("✅ 状态已推送到 Telegram。", flush=True)
             return
 
-        # 5. 点击 RENOVAR 并处理弹窗验证
+        # 6. 点击 RENOVAR 并处理续期弹窗验证
         renew_success = False
         for idx, btn in enumerate(renovar_buttons):
             print(f"👉 正在点击第 {idx+1}/{len(renovar_buttons)} 台服务器的 RENOVAR 按钮...", flush=True)
             human_click(driver, btn)
-            human_sleep(2.5, 4.0)
+            human_sleep(2.5, 3.5)
 
-            print("  🛡️ 处理续期弹窗内 Turnstile 人机验证...", flush=True)
-            bypass_cf_turnstile(driver, timeout=20)
-            human_sleep(1.5, 2.5)
+            # 处理弹窗内验证码
+            solve_turnstile(driver, timeout=20, context_desc="续期弹窗验证")
+            human_sleep(1.0, 2.0)
 
             confirm_xpath = "//button[contains(., 'CONFIRMAR') or contains(., 'Confirmar') or contains(., 'RENOVACIÓN')]"
             confirm_btns = driver.find_elements(By.XPATH, confirm_xpath)
@@ -346,7 +346,7 @@ def main():
             else:
                 print("  ⚠️ 未找到确认续期按钮或按钮未激活", flush=True)
 
-        # 6. 刷新获取续期后状态
+        # 7. 刷新获取最新状态并推送报告
         driver.refresh()
         human_sleep(4.0, 6.0)
         status_after = get_servers_info(driver)
@@ -361,7 +361,7 @@ def main():
             f"⏰ <b>执行时间：</b><code>{now_time}</code>",
             photo_path="ek_final.png"
         )
-        print("\n🎉 全部操作已顺利完成，已推送到 Telegram！", flush=True)
+        print("\n🎉 全部操作执行完毕，报告已发送至 Telegram！", flush=True)
 
     except Exception as e:
         err = str(e)
