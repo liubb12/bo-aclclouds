@@ -1,9 +1,9 @@
 name: EKNodes Auto Renew
 
 on:
-  workflow_dispatch:          # 支持手动点击运行
+  workflow_dispatch:          # 支持网页手动点击运行
   repository_dispatch:
-    types: [ek_renew]         # 接收外部面板的轻量唤醒指令
+    types: [ek_renew]         # 接收外部面板的自动化唤醒
 
 jobs:
   renew:
@@ -37,7 +37,6 @@ jobs:
 
       - name: Run EKNodes Renew Script
         env:
-          EK_COOKIE: ${{ secrets.EK_COOKIE }}          # 👈 核心：把刚刚配的 Cookie 传入脚本
           EK_EMAIL: ${{ secrets.EK_EMAIL }}
           EK_USERNAME: ${{ secrets.EK_USERNAME }}
           EK_PASSWORD: ${{ secrets.EK_PASSWORD }}
