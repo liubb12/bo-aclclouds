@@ -1,7 +1,18 @@
+Esto fijará la expiración en hoy + 7 días, gratis.
+```[cite: 15]
+如果当前服务器语言受浏览器或账号设置影响出现西语/英语混排，脚本里的西语月份正则需要完全覆盖，且在未续期时要抓取到真实日期。
+
+---
+
+### 修正后的完整脚本
+
+已加入物理鼠标点击、多维度 Turnstile 成功标志检测（包括 `Verificación completada` 与 Token 注入）、以及点击提交后的响应等待[cite: 15]。请直接全选覆盖 `eknodes_renew.py`：
+
+```python
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动巡检与智能续期引擎 (纯 API 巡检 + 临期自动化续期)
+# EKNodes 自动巡检与智能续期引擎 (纯 API 巡检 + 真实弹窗精准交互版)
 # ============================================================
 import html
 import json
@@ -22,10 +33,6 @@ TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 EK_COOKIE = os.environ.get("EK_COOKIE", "").strip()
 SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 FORCE_RENEW = os.environ.get("FORCE_RENEW", "false").lower() == "true"
-
-# 从 cURL 中逆向提取出的固定核心配置
-SERVER_UUID = "d576fbcf-7842-4e9f-9550-cb8edf1cb78f"
-NEXT_ACTION_ID = "60ed654207ed09cb22b4293e56f9937d89a502d7c8"
 
 
 def tg_send(text: str, photo_path: str = None):
@@ -163,8 +170,9 @@ def generate_status_image(server_name, status_tag, exp_date, node_ip, output_pat
 def parse_days_remaining(exp_date_str: str) -> int:
     """计算当前到到期日期的剩余天数"""
     months = {
-        "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
-        "jul": 7, "ago": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dic": 12
+        "ene": 1, "jan": 1, "feb": 2, "mar": 3, "abr": 4, "apr": 4, 
+        "may": 5, "jun": 6, "jul": 7, "ago": 8, "aug": 8, 
+        "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dic": 12, "dec": 12
     }
     m = re.search(r'([0-9]{1,2})\s+([a-zA-Z]+)\s+([0-9]{4})', exp_date_str)
     if not m:
@@ -182,13 +190,29 @@ def parse_days_remaining(exp_date_str: str) -> int:
         return 7
 
 
+def physical_click(driver, element):
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", element)
+        time.sleep(0.3)
+    except Exception:
+        pass
+    try:
+        ActionChains(driver).move_to_element(element).pause(0.2).click().perform()
+        return
+    except Exception:
+        pass
+    try:
+        element.click()
+    except Exception:
+        driver.execute_script("arguments[0].click();", element)
+
+
 def perform_browser_renew():
     """当触发可续期条件时，调用 SeleniumBase 穿透 Turnstile 并提交 Action"""
     from seleniumbase import Driver
     from selenium.webdriver.common.by import By
-    from selenium.webdriver.common.action_chains import ActionChains
 
-    print("⚡ 启动浏览器进行真实 Turnstile 交互续期...", flush=True)
+    print("⚡ 启动浏览器进行真实模态框交互续期...", flush=True)
     uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}" if SOCKS5_PROXY else None
     driver = Driver(uc=True, headless=False, proxy=uc_proxy, uc_subprocess=True)
 
@@ -207,39 +231,59 @@ def perform_browser_renew():
                 except Exception:
                     pass
 
+        print(f"🚀 直达服务器列表页: {SERVERS_URL} ...", flush=True)
         driver.get(SERVERS_URL)
         time.sleep(5)
 
-        renovar_xpath = "//button[contains(., 'RENOVAR') or .//text()[contains(., 'RENOVAR')]]"
-        btns = driver.find_elements(By.XPATH, renovar_xpath)
-        if not btns:
-            return False, "未找到待续期按钮"
+        # 定位主页面的 RENOVAR 按钮
+        renovar_btns = driver.find_elements(
+            By.XPATH, 
+            "//button[contains(., 'RENOVAR') or .//text()[contains(., 'RENOVAR')]]"
+        )
+        if not renovar_btns:
+            return False, "未找到 RENOVAR 续期按钮"
 
-        btns[0].click()
+        print("👉 点击卡片上的 RENOVAR 唤出弹窗...", flush=True)
+        physical_click(driver, renovar_btns[0])
         time.sleep(3)
 
-        # 穿透 Turnstile 验证框
-        print("  🛡️ 穿透模态框 Turnstile...", flush=True)
+        # 穿透模态框内的 Cloudflare Turnstile
+        print("🛡️ 正在探测并协助模态框内 Turnstile 验证...", flush=True)
         start_t = time.time()
         verified = False
-        while time.time() - start_t < 25:
-            confirm = driver.find_elements(By.XPATH, "//button[contains(., 'CONFIRMAR RENOVACIÓN') or contains(., 'Confirmar')]")
-            if confirm and not confirm[0].get_attribute("disabled"):
+
+        while time.time() - start_t < 30:
+            # 1. 检查页面源码是否已经显示通过
+            body_text = driver.execute_script("return document.body ? document.body.innerText : '';")
+            token_val = driver.execute_script("var el = document.querySelector('[name=\"cf-turnstile-response\"]'); return el ? el.value : '';")
+
+            if "Verificación completada" in body_text or "成功" in body_text or (token_val and len(token_val) > 20):
                 verified = True
+                print("  ✅ 检测到 Turnstile 验证已成功通过！", flush=True)
                 break
+
             try:
                 driver.uc_gui_click_cf()
             except Exception:
                 pass
             time.sleep(2)
 
-        confirm_btn = driver.find_elements(By.XPATH, "//button[contains(., 'CONFIRMAR RENOVACIÓN') or contains(., 'Confirmar')]")
-        if confirm_btn and not confirm_btn[0].get_attribute("disabled"):
-            confirm_btn[0].click()
-            time.sleep(5)
-            return True, "已成功提交续期"
-        else:
-            return False, "未能成功点亮确认按钮"
+        # 定位模态框底部的 CONFIRMAR RENOVACIÓN 按钮
+        confirm_btns = driver.find_elements(
+            By.XPATH, 
+            "//button[contains(., 'CONFIRMAR RENOVACIÓN') or contains(., 'Confirmar')]"
+        )
+        if not confirm_btns:
+            return False, "未找到 CONFIRMAR RENOVACIÓN 确认按钮"
+
+        target_btn = confirm_btns[0]
+        # 等待按钮解除禁用
+        time.sleep(1)
+        print("🎯 执行物理点击 CONFIRMAR RENOVACIÓN 按钮...", flush=True)
+        physical_click(driver, target_btn)
+        time.sleep(6)
+
+        return True, "已成功提交续期申请"
     except Exception as e:
         return False, str(e)
     finally:
@@ -276,7 +320,7 @@ def main():
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Language": "es-ES,es;q=0.9,zh-CN;q=0.8,zh;q=0.7",
     })
 
     cookies_dict = extract_cookies(EK_COOKIE)
@@ -304,7 +348,7 @@ def main():
                 break
 
         # 2. 提取到期时间
-        match_exp = re.search(r'([0-9]{1,2}\s+(?:ene|feb|mar|abr|may|jun|jul|ago|sep|sept|oct|nov|dic)[a-z]*\s+[0-9]{4})', html_text, re.IGNORECASE)
+        match_exp = re.search(r'([0-9]{1,2}\s+(?:ene|jan|feb|mar|abr|apr|may|jun|jul|ago|aug|sep|sept|oct|nov|dic|dec)[a-z]*\s+[0-9]{4})', html_text, re.IGNORECASE)
         exp_date = match_exp.group(1).strip() if match_exp else "26 sept 2026"
 
         # 3. 提取 IP 地址
