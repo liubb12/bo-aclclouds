@@ -1,14 +1,3 @@
-Esto fijará la expiración en hoy + 7 días, gratis.
-```[cite: 15]
-如果当前服务器语言受浏览器或账号设置影响出现西语/英语混排，脚本里的西语月份正则需要完全覆盖，且在未续期时要抓取到真实日期。
-
----
-
-### 修正后的完整脚本
-
-已加入物理鼠标点击、多维度 Turnstile 成功标志检测（包括 `Verificación completada` 与 Token 注入）、以及点击提交后的响应等待[cite: 15]。请直接全选覆盖 `eknodes_renew.py`：
-
-```python
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
@@ -168,7 +157,6 @@ def generate_status_image(server_name, status_tag, exp_date, node_ip, output_pat
 
 
 def parse_days_remaining(exp_date_str: str) -> int:
-    """计算当前到到期日期的剩余天数"""
     months = {
         "ene": 1, "jan": 1, "feb": 2, "mar": 3, "abr": 4, "apr": 4, 
         "may": 5, "jun": 6, "jul": 7, "ago": 8, "aug": 8, 
@@ -197,6 +185,7 @@ def physical_click(driver, element):
     except Exception:
         pass
     try:
+        from selenium.webdriver.common.action_chains import ActionChains
         ActionChains(driver).move_to_element(element).pause(0.2).click().perform()
         return
     except Exception:
@@ -208,7 +197,6 @@ def physical_click(driver, element):
 
 
 def perform_browser_renew():
-    """当触发可续期条件时，调用 SeleniumBase 穿透 Turnstile 并提交 Action"""
     from seleniumbase import Driver
     from selenium.webdriver.common.by import By
 
@@ -220,7 +208,6 @@ def perform_browser_renew():
         driver.uc_open_with_reconnect(BASE_URL, reconnect_time=4)
         time.sleep(2)
 
-        # 注入 Cookie
         cookies_dict = extract_cookies(EK_COOKIE)
         for k, v in cookies_dict.items():
             try:
@@ -235,7 +222,6 @@ def perform_browser_renew():
         driver.get(SERVERS_URL)
         time.sleep(5)
 
-        # 定位主页面的 RENOVAR 按钮
         renovar_btns = driver.find_elements(
             By.XPATH, 
             "//button[contains(., 'RENOVAR') or .//text()[contains(., 'RENOVAR')]]"
@@ -247,18 +233,13 @@ def perform_browser_renew():
         physical_click(driver, renovar_btns[0])
         time.sleep(3)
 
-        # 穿透模态框内的 Cloudflare Turnstile
         print("🛡️ 正在探测并协助模态框内 Turnstile 验证...", flush=True)
         start_t = time.time()
-        verified = False
-
         while time.time() - start_t < 30:
-            # 1. 检查页面源码是否已经显示通过
             body_text = driver.execute_script("return document.body ? document.body.innerText : '';")
             token_val = driver.execute_script("var el = document.querySelector('[name=\"cf-turnstile-response\"]'); return el ? el.value : '';")
 
             if "Verificación completada" in body_text or "成功" in body_text or (token_val and len(token_val) > 20):
-                verified = True
                 print("  ✅ 检测到 Turnstile 验证已成功通过！", flush=True)
                 break
 
@@ -268,7 +249,6 @@ def perform_browser_renew():
                 pass
             time.sleep(2)
 
-        # 定位模态框底部的 CONFIRMAR RENOVACIÓN 按钮
         confirm_btns = driver.find_elements(
             By.XPATH, 
             "//button[contains(., 'CONFIRMAR RENOVACIÓN') or contains(., 'Confirmar')]"
@@ -277,7 +257,6 @@ def perform_browser_renew():
             return False, "未找到 CONFIRMAR RENOVACIÓN 确认按钮"
 
         target_btn = confirm_btns[0]
-        # 等待按钮解除禁用
         time.sleep(1)
         print("🎯 执行物理点击 CONFIRMAR RENOVACIÓN 按钮...", flush=True)
         physical_click(driver, target_btn)
@@ -338,7 +317,6 @@ def main():
 
         html_text = resp.text
 
-        # 1. 提取实例名称
         names = re.findall(r'<h3[^>]*>([^<]+)</h3>|<div[^>]*class="[^"]*font-(?:bold|semibold)[^"]*"[^>]*>([^<]+)</div>', html_text)
         server_name = "mi fghko"
         for n1, n2 in names:
@@ -347,15 +325,12 @@ def main():
                 server_name = val
                 break
 
-        # 2. 提取到期时间
         match_exp = re.search(r'([0-9]{1,2}\s+(?:ene|jan|feb|mar|abr|apr|may|jun|jul|ago|aug|sep|sept|oct|nov|dic|dec)[a-z]*\s+[0-9]{4})', html_text, re.IGNORECASE)
         exp_date = match_exp.group(1).strip() if match_exp else "26 sept 2026"
 
-        # 3. 提取 IP 地址
         match_ip = re.search(r'([a-zA-Z0-9\.\-_]+\.eknodes\.es:[0-9]+)', html_text)
         node_ip = match_ip.group(1).strip() if match_ip else "us1.eknodes.es:3336"
 
-        # 4. 提取运行状态
         status_tag = "Online"
         if "Iniciando" in html_text:
             status_tag = "Iniciando"
@@ -368,7 +343,6 @@ def main():
 
         card_img_path = generate_status_image(server_name, status_tag, exp_date, node_ip)
 
-        # 5. 核心调度：剩余周期 > 3 天且未指定强制续期时跳过点击
         if days_left > 3 and not FORCE_RENEW:
             print(f"ℹ️ 剩余天数（{days_left} 天）充裕，无需执行续期。", flush=True)
             result_tag = f"周期充足 ({days_left}天)，无需续期"
@@ -377,7 +351,6 @@ def main():
             ok, msg = perform_browser_renew()
             result_tag = "✅ 续期完成 (+7天)" if ok else f"⚠️ 续期动作反馈: {msg}"
 
-        # 6. 推送图文通知
         tg_send(
             f"🛡️ <b>EKNodes 服务器巡检与续期报告</b>\n\n"
             f"📊 <b>实例状态：</b>\n{server_info}\n\n"
