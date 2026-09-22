@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 终极自动续期脚本 (核弹级清理全屏广告版)
+# VOER Host 终极自动续期脚本 (防吞广告动态补刀版)
 # ============================================================
 import html
 import json
@@ -402,13 +402,10 @@ def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bo
 
 def ensure_inside_ads_modal(driver):
     driver.switch_to.default_content()
-    
-    # 扫雷：先强删所有挡视野的牛皮癣广告
     nuke_overlay_ads(driver)
     dismiss_unlock_modal(driver)
     time.sleep(1) 
 
-    # 0. 检查最终播放器
     final_modal_indicators = [
         "//*[contains(text(), 'Progress')]",
         "//*[contains(text(), 'Watch') and contains(text(), 'ads to start')]",
@@ -443,11 +440,9 @@ def ensure_inside_ads_modal(driver):
                 pass
         return False
 
-    # 1. 尝试确认弹窗
     if try_click_confirm_modal():
         return True
 
-    # 2. 从头开始，点击 [+ Extend]
     try:
         extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend') and not(@disabled)]")
         if extend_btns:
@@ -461,12 +456,10 @@ def ensure_inside_ads_modal(driver):
                             time.sleep(1)
                             if try_click_confirm_modal():
                                 return True
-                    print("  ⚠️ 三次尝试点击 [+ Extend] 均未见弹窗！", flush=True)
                     return False
     except Exception:
         pass
 
-    # 3. 离线唤醒
     try:
         start_btns = driver.find_elements(
             By.XPATH,
@@ -569,6 +562,18 @@ def handle_sound_and_close_ad(driver, max_wait_sec=65) -> bool:
     return False
 
 
+def check_if_fully_completed(driver) -> bool:
+    """实时检测当前广告进度是否已经达到 4/4"""
+    driver.switch_to.default_content()
+    try:
+        src = driver.get_page_source()
+        if "4 / 4" in src or ">4/4<" in src.replace(" ", ""):
+            return True
+    except:
+        pass
+    return False
+
+
 def main():
     print("=== VOER 终极自动续期任务初始化 ===", flush=True)
 
@@ -628,14 +633,16 @@ def main():
             print(f"💡 剩余时间充裕（约 {round(init_sec / 3600, 1)} 小时），跳过看广告。", flush=True)
             return
 
+        # 核心修改：动态防吞广告模式，最多尝试 6 轮！
         completed = 0
-        for current_ad in range(1, 5):
-            print(f"\n🎬 === 正在执行第 {current_ad}/4 轮广告 ===", flush=True)
+        for current_ad in range(1, 7):
+            if check_if_fully_completed(driver):
+                print("  🎉 检测到进度已满 4/4，提前结束广告循环！", flush=True)
+                break
+
+            print(f"\n🎬 === 正在执行第 {current_ad} 轮广告交互 (防吞补刀模式) ===", flush=True)
             
-            # 先给网页洗个澡，清理掉所有的遮挡物
             nuke_overlay_ads(driver)
-            
-            # 使用穿透点击与重试的确保弹窗逻辑
             ensure_inside_ads_modal(driver)
 
             clicked = False
@@ -644,18 +651,26 @@ def main():
                     print(f"  🎯 第 {sec + 1} 秒击发第 {current_ad} 轮 [Watch ad]！", flush=True)
                     clicked = True
                     break
+                
+                # 轮询时顺便盯一眼进度，如果满了就别等了
+                if check_if_fully_completed(driver):
+                    print("  🎉 检测到进度已满 4/4，提前结束战斗！", flush=True)
+                    break
                 time.sleep(1)
+
+            if check_if_fully_completed(driver):
+                break
 
             if not clicked:
                 driver.switch_to.default_content()
                 driver.save_screenshot(f"stuck_round_{current_ad}.png")
-                print(f"  ⚠️ 未能出现第 {current_ad} 轮的 [Watch ad] 按钮", flush=True)
+                print(f"  ⚠️ 未能出现第 {current_ad} 轮的 [Watch ad] 按钮，结束当前补刀", flush=True)
                 break
 
             time.sleep(2)
             handle_sound_and_close_ad(driver, max_wait_sec=65)
             completed += 1
-            print(f"  ✅ 第 {current_ad} 个广告展示完毕！", flush=True)
+            print(f"  ✅ 第 {current_ad} 轮交互完毕！", flush=True)
             time.sleep(3)
 
         now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
@@ -680,7 +695,7 @@ def main():
 
         tg_send(
             f"📋 <b>VOER Host 自动续期汇总</b>\n\n"
-            f"🎬 <b>观看广告：</b><code>{completed}/4</code> 轮\n"
+            f"🎬 <b>广告交互：</b><code>{completed}</code> 轮\n"
             f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
             f"📊 <b>今日进度：</b><code>{html.escape(final_prog)}</code>\n"
             f"⏰ <b>执行时间：</b><code>{now}</code>",
