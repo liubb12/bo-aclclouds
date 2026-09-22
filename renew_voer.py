@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 终极自动续期脚本 (适配 Extend Session 二次确认弹窗)
+# VOER Host 终极自动续期脚本 (修复确认弹窗时序漏洞版)
 # ============================================================
 import html
 import json
@@ -24,7 +24,6 @@ LOCAL_HTTP_PORT = 18080
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 
-# 凭据配置：优先使用 Cookie，过期自动使用 邮箱+密码 登录刷新
 VOER_COOKIES = os.environ.get("VOER_COOKIES", "").strip() or os.environ.get("VOER_TOKEN", "").strip()
 VOER_EMAIL = os.environ.get("VOER_EMAIL", "").strip() or os.environ.get("EMAIL", "").strip()
 VOER_PASSWORD = os.environ.get("VOER_PASSWORD", "").strip() or os.environ.get("PASSWORD", "").strip()
@@ -388,7 +387,7 @@ def ensure_inside_ads_modal(driver):
     driver.switch_to.default_content()
     dismiss_unlock_modal(driver)
 
-    # 第一段：0. 判断最终的广告播放器（带 Progress 的页面）是否已经打开
+    # 0. 如果最终播放器已经在了，直接开刷
     final_modal_indicators = [
         "//*[contains(text(), 'Progress')]",
         "//*[contains(text(), 'Watch') and contains(text(), 'ads to start')]",
@@ -397,16 +396,15 @@ def ensure_inside_ads_modal(driver):
     ]
     for ind in final_modal_indicators:
         try:
-            elems = driver.find_elements(By.XPATH, ind)
-            for el in elems:
-                if el.is_displayed():
-                    print("  ℹ️ 最终广告播放器已就绪，等待获取广告...", flush=True)
-                    return  # 直接返回，防止连点
+            if driver.find_elements(By.XPATH, ind):
+                print("  ℹ️ 最终广告播放器已就绪，等待获取广告...", flush=True)
+                return
         except Exception:
             pass
 
-    # 第二段：1. 判断是否卡在 "Extend Session" 确认弹窗（绿色的 ✓ Watch Ads）
-    confirm_xpath = "//button[contains(., 'Watch Ads')]"
+    confirm_xpath = "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'watch ads')]"
+    
+    # 1. 尝试直接点击现成的绿色确认弹窗
     try:
         confirm_btns = driver.find_elements(By.XPATH, confirm_xpath)
         for b in confirm_btns:
@@ -418,7 +416,7 @@ def ensure_inside_ads_modal(driver):
     except Exception:
         pass
 
-    # 第三段：2. 如果什么都没开，尝试点击面板上的 [+ Extend]
+    # 2. 从头开始，点击 [+ Extend]
     try:
         extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend') and not(@disabled)]")
         if extend_btns:
@@ -426,20 +424,23 @@ def ensure_inside_ads_modal(driver):
                 if eb.is_displayed():
                     print("  ℹ️ 点击面板上的 [+ Extend] 触发续期...", flush=True)
                     physical_click_trusted(driver, eb)
-                    time.sleep(3)
-                    # 点完肯定出中间弹窗，马上再寻找并点击绿色的 Watch Ads
-                    c_btns = driver.find_elements(By.XPATH, confirm_xpath)
-                    for cb in c_btns:
-                        if cb.is_displayed():
-                            print("  ℹ️ 点击确认弹窗的 [✓ Watch Ads] 按钮进入播放器...", flush=True)
-                            physical_click_trusted(driver, cb)
-                            time.sleep(4)
-                            return
+                    
+                    # 【核心修复】：增加 10 秒动态轮询等待确认弹窗出现，不让它轻易逃脱！
+                    print("  ⏳ 正在等待确认弹窗加载...", flush=True)
+                    for _ in range(10):
+                        time.sleep(1)
+                        c_btns = driver.find_elements(By.XPATH, confirm_xpath)
+                        for cb in c_btns:
+                            if cb.is_displayed():
+                                print("  ℹ️ 成功捕捉到确认弹窗，点击 [✓ Watch Ads] 进入播放器...", flush=True)
+                                physical_click_trusted(driver, cb)
+                                time.sleep(4)
+                                return
                     return
     except Exception:
         pass
 
-    # 第四段：3. 尝试离线开机 Start
+    # 3. 如果是关机状态，尝试点击 Start 唤醒
     try:
         start_btns = driver.find_elements(
             By.XPATH,
@@ -450,23 +451,27 @@ def ensure_inside_ads_modal(driver):
                 if sb.is_displayed():
                     print(f"  ℹ️ 服务器离线，点击 [{sb.text.strip()}] 唤醒控制台...", flush=True)
                     physical_click_trusted(driver, sb)
-                    time.sleep(4)
+                    time.sleep(2)
                     dismiss_unlock_modal(driver)
-                    # 点完有可能出中间弹窗
-                    c_btns = driver.find_elements(By.XPATH, confirm_xpath)
-                    for cb in c_btns:
-                        if cb.is_displayed():
-                            print("  ℹ️ 点击确认弹窗的 [✓ Watch Ads] 按钮进入播放器...", flush=True)
-                            physical_click_trusted(driver, cb)
-                            time.sleep(4)
-                            return
+                    
+                    # 同样增加 10 秒动态轮询
+                    print("  ⏳ 正在等待确认弹窗加载...", flush=True)
+                    for _ in range(10):
+                        time.sleep(1)
+                        c_btns = driver.find_elements(By.XPATH, confirm_xpath)
+                        for cb in c_btns:
+                            if cb.is_displayed():
+                                print("  ℹ️ 成功捕捉到确认弹窗，点击 [✓ Watch Ads] 进入播放器...", flush=True)
+                                physical_click_trusted(driver, cb)
+                                time.sleep(4)
+                                return
                     return
     except Exception:
         pass
 
 
 def click_watch_ad_everywhere(driver) -> bool:
-    """仅在最终的广告播放器中寻找真正的【看广告】按钮，不与绿色确认键冲突"""
+    """仅在最终的广告播放器中寻找真正的【看广告】按钮"""
     xpaths = [
         "//button[normalize-space(.)='Watch ad' or text()='Watch ad']",
         "//button[contains(translate(., 'AD', 'ad'), 'watch ad')]",
@@ -571,7 +576,6 @@ def main():
 
     try:
         logged_in = False
-        # 1. 尝试使用现有的 Cookie / Token 注入
         if VOER_COOKIES:
             print("🔑 执行现有会话注入恢复...", flush=True)
             driver.uc_open_with_reconnect(BASE_URL, reconnect_time=5)
@@ -588,7 +592,6 @@ def main():
             else:
                 print("⚠️ 现有会话已失效，被重定向至登录页，准备降级尝试账号密码登录...", flush=True)
 
-        # 2. 如果无 Cookie 或已失效，自动切入账号密码登录破盾流程
         if not logged_in:
             if not handle_turnstile_and_login(driver, VOER_EMAIL, VOER_PASSWORD):
                 print("❌ 所有登录途径均失败，退出任务。", flush=True)
@@ -599,7 +602,6 @@ def main():
             time.sleep(8)
             dismiss_pwa_popups(driver)
 
-        # 3. 读取状态并检查是否跳过
         expire_info_before, init_sec, init_prog = get_expire_and_progress(driver)
         print(f"⏳ 初始服务器状态: {expire_info_before} | 今日进度: {init_prog}", flush=True)
 
@@ -607,17 +609,15 @@ def main():
             print(f"💡 剩余时间充裕（约 {round(init_sec / 3600, 1)} 小时），跳过看广告。", flush=True)
             return
 
-        # 4. 执行 4 轮看广告流程
         completed = 0
         for current_ad in range(1, 5):
             print(f"\n🎬 === 正在执行第 {current_ad}/4 轮广告 ===", flush=True)
             
-            # 智能判断打开状态，自动穿透中间确认弹窗
+            # 使用带有动态轮询的确保弹窗逻辑
             ensure_inside_ads_modal(driver)
 
             clicked = False
             for sec in range(35):
-                # 只点击最终播放器里的 Watch ad
                 if click_watch_ad_everywhere(driver):
                     print(f"  🎯 第 {sec + 1} 秒击发第 {current_ad} 轮 [Watch ad]！", flush=True)
                     clicked = True
@@ -636,7 +636,6 @@ def main():
             print(f"  ✅ 第 {current_ad} 个广告展示完毕！", flush=True)
             time.sleep(3)
 
-        # 5. 收尾与通知
         now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
         driver.switch_to.default_content()
         final_close_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Close') or contains(., 'Done')]")
