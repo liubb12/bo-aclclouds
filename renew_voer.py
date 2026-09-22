@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 终极自动续期脚本 (修复确认弹窗时序漏洞版)
+# VOER Host 终极自动续期脚本 (修复透明广告遮挡与三连击版)
 # ============================================================
 import html
 import json
@@ -24,6 +24,7 @@ LOCAL_HTTP_PORT = 18080
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 
+# 凭据配置：优先使用 Cookie，过期自动使用 邮箱+密码 登录刷新
 VOER_COOKIES = os.environ.get("VOER_COOKIES", "").strip() or os.environ.get("VOER_TOKEN", "").strip()
 VOER_EMAIL = os.environ.get("VOER_EMAIL", "").strip() or os.environ.get("EMAIL", "").strip()
 VOER_PASSWORD = os.environ.get("VOER_PASSWORD", "").strip() or os.environ.get("PASSWORD", "").strip()
@@ -101,28 +102,27 @@ def start_gost(socks_proxy: str) -> subprocess.Popen:
 
 
 def physical_click_trusted(driver, element):
+    """终极霸道点击法：融合 JS 无视遮挡穿透与物理鼠标模拟"""
     try:
         driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", element)
-        time.sleep(0.1)
+        time.sleep(0.2)
     except Exception:
         pass
+        
+    # 第一层：使用 JS 强制点击，彻底无视任何透明广告遮挡层！
+    try:
+        driver.execute_script("arguments[0].click();", element)
+    except Exception:
+        pass
+        
+    # 第二层：如果 JS 不生效，补一发真实的物理点击
     try:
         ActionChains(driver).move_to_element(element).pause(0.1).click().perform()
-        return
     except Exception:
         pass
+        
     try:
         element.click()
-        return
-    except Exception:
-        pass
-    try:
-        driver.execute_script("""
-            const el = arguments[0];
-            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
-                el.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
-            });
-        """, element)
     except Exception:
         pass
 
@@ -383,11 +383,12 @@ def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bo
 
 
 def ensure_inside_ads_modal(driver):
-    """三段式判断：最终播放器 -> 中间确认框 -> 面板上的 Extend 按钮"""
+    """强化版三段式：防遮挡防丢失的重试确认机制"""
     driver.switch_to.default_content()
     dismiss_unlock_modal(driver)
+    time.sleep(1) # 等待任何可能的遮罩动画消退
 
-    # 0. 如果最终播放器已经在了，直接开刷
+    # 0. 如果已经在最终播放器内了，直接返回
     final_modal_indicators = [
         "//*[contains(text(), 'Progress')]",
         "//*[contains(text(), 'Watch') and contains(text(), 'ads to start')]",
@@ -398,45 +399,52 @@ def ensure_inside_ads_modal(driver):
         try:
             if driver.find_elements(By.XPATH, ind):
                 print("  ℹ️ 最终广告播放器已就绪，等待获取广告...", flush=True)
-                return
+                return True
         except Exception:
             pass
 
-    confirm_xpath = "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'watch ads')]"
-    
-    # 1. 尝试直接点击现成的绿色确认弹窗
-    try:
-        confirm_btns = driver.find_elements(By.XPATH, confirm_xpath)
-        for b in confirm_btns:
-            if b.is_displayed():
-                print("  ℹ️ 发现 [Extend Session] 确认弹窗，点击绿色 [✓ Watch Ads] 按钮...", flush=True)
-                physical_click_trusted(driver, b)
-                time.sleep(4)
-                return
-    except Exception:
-        pass
+    # 包含多种可能性（兼容按钮或a标签）的绿色确认按钮
+    confirm_xpaths = [
+        "//button[contains(., 'Watch Ads') or contains(., 'Watch ads')]",
+        "//a[contains(., 'Watch Ads') or contains(., 'Watch ads')]",
+        "//*[contains(text(), 'Watch Ads') or contains(text(), 'Watch ads')]"
+    ]
 
-    # 2. 从头开始，点击 [+ Extend]
+    def try_click_confirm_modal():
+        for cx in confirm_xpaths:
+            try:
+                c_btns = driver.find_elements(By.XPATH, cx)
+                for cb in c_btns:
+                    if cb.is_displayed():
+                        print("  ℹ️ 成功捕捉到中间确认弹窗，点击 [✓ Watch Ads] 进入播放器...", flush=True)
+                        physical_click_trusted(driver, cb)
+                        time.sleep(4)
+                        return True
+            except Exception:
+                pass
+        return False
+
+    # 1. 尝试直接点击现成的绿色确认弹窗
+    if try_click_confirm_modal():
+        return True
+
+    # 2. 如果没弹窗，就去点击 [+ Extend]
     try:
         extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend') and not(@disabled)]")
         if extend_btns:
             for eb in extend_btns:
                 if eb.is_displayed():
                     print("  ℹ️ 点击面板上的 [+ Extend] 触发续期...", flush=True)
-                    physical_click_trusted(driver, eb)
-                    
-                    # 【核心修复】：增加 10 秒动态轮询等待确认弹窗出现，不让它轻易逃脱！
-                    print("  ⏳ 正在等待确认弹窗加载...", flush=True)
-                    for _ in range(10):
-                        time.sleep(1)
-                        c_btns = driver.find_elements(By.XPATH, confirm_xpath)
-                        for cb in c_btns:
-                            if cb.is_displayed():
-                                print("  ℹ️ 成功捕捉到确认弹窗，点击 [✓ Watch Ads] 进入播放器...", flush=True)
-                                physical_click_trusted(driver, cb)
-                                time.sleep(4)
-                                return
-                    return
+                    # 【核心修复】：增加三连击机制。点一次，等5秒，如果不出来，再点！防止点击被透明遮罩吃掉！
+                    for attempt in range(3):
+                        physical_click_trusted(driver, eb)
+                        print(f"  ⏳ 正在等待确认弹窗加载 (尝试 {attempt+1}/3)...", flush=True)
+                        for _ in range(5):
+                            time.sleep(1)
+                            if try_click_confirm_modal():
+                                return True
+                    print("  ⚠️ 三次尝试点击 [+ Extend] 均未见弹窗，可能被严重遮挡！", flush=True)
+                    return False
     except Exception:
         pass
 
@@ -450,22 +458,14 @@ def ensure_inside_ads_modal(driver):
             for sb in start_btns:
                 if sb.is_displayed():
                     print(f"  ℹ️ 服务器离线，点击 [{sb.text.strip()}] 唤醒控制台...", flush=True)
-                    physical_click_trusted(driver, sb)
-                    time.sleep(2)
-                    dismiss_unlock_modal(driver)
-                    
-                    # 同样增加 10 秒动态轮询
-                    print("  ⏳ 正在等待确认弹窗加载...", flush=True)
-                    for _ in range(10):
-                        time.sleep(1)
-                        c_btns = driver.find_elements(By.XPATH, confirm_xpath)
-                        for cb in c_btns:
-                            if cb.is_displayed():
-                                print("  ℹ️ 成功捕捉到确认弹窗，点击 [✓ Watch Ads] 进入播放器...", flush=True)
-                                physical_click_trusted(driver, cb)
-                                time.sleep(4)
-                                return
-                    return
+                    for attempt in range(3):
+                        physical_click_trusted(driver, sb)
+                        print(f"  ⏳ 正在等待确认弹窗加载 (尝试 {attempt+1}/3)...", flush=True)
+                        for _ in range(5):
+                            time.sleep(1)
+                            if try_click_confirm_modal():
+                                return True
+                    return False
     except Exception:
         pass
 
@@ -613,7 +613,7 @@ def main():
         for current_ad in range(1, 5):
             print(f"\n🎬 === 正在执行第 {current_ad}/4 轮广告 ===", flush=True)
             
-            # 使用带有动态轮询的确保弹窗逻辑
+            # 使用穿透点击与重试的确保弹窗逻辑
             ensure_inside_ads_modal(driver)
 
             clicked = False
