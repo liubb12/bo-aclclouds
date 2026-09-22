@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 终极自动续期脚本 (修复透明广告遮挡与三连击版)
+# VOER Host 终极自动续期脚本 (核弹级清理全屏广告版)
 # ============================================================
 import html
 import json
@@ -101,26 +101,43 @@ def start_gost(socks_proxy: str) -> subprocess.Popen:
     return proc
 
 
+def nuke_overlay_ads(driver):
+    """【核弹级清理】直接删除 DOM 树中的全屏牛皮癣广告"""
+    driver.switch_to.default_content()
+    try:
+        driver.execute_script("""
+            // 1. 删除所有疑似 Google Ads 或联盟广告的 iframe
+            document.querySelectorAll('iframe').forEach(f => {
+                if (f.id.includes('aswift') || f.id.includes('google_ads') || f.src.includes('doubleclick') || f.src.includes('syndication')) {
+                    f.remove();
+                }
+            });
+            // 2. 模拟点击文本为 Close 的悬浮按钮
+            document.querySelectorAll('div, span, button').forEach(el => {
+                if (el.innerText && el.innerText.trim().toLowerCase() === 'close' && window.getComputedStyle(el).cursor === 'pointer') {
+                    el.click();
+                }
+            });
+        """)
+        time.sleep(1)
+    except Exception:
+        pass
+
+
 def physical_click_trusted(driver, element):
-    """终极霸道点击法：融合 JS 无视遮挡穿透与物理鼠标模拟"""
     try:
         driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", element)
         time.sleep(0.2)
     except Exception:
         pass
-        
-    # 第一层：使用 JS 强制点击，彻底无视任何透明广告遮挡层！
     try:
         driver.execute_script("arguments[0].click();", element)
     except Exception:
         pass
-        
-    # 第二层：如果 JS 不生效，补一发真实的物理点击
     try:
         ActionChains(driver).move_to_element(element).pause(0.1).click().perform()
     except Exception:
         pass
-        
     try:
         element.click()
     except Exception:
@@ -293,6 +310,7 @@ def handle_turnstile_and_login(driver, email: str, password: str) -> bool:
 
 
 def get_expire_and_progress(driver) -> tuple:
+    nuke_overlay_ads(driver)
     dismiss_pwa_popups(driver)
     raw_str = "未知"
     total_seconds = 0
@@ -383,12 +401,14 @@ def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bo
 
 
 def ensure_inside_ads_modal(driver):
-    """强化版三段式：防遮挡防丢失的重试确认机制"""
     driver.switch_to.default_content()
+    
+    # 扫雷：先强删所有挡视野的牛皮癣广告
+    nuke_overlay_ads(driver)
     dismiss_unlock_modal(driver)
-    time.sleep(1) # 等待任何可能的遮罩动画消退
+    time.sleep(1) 
 
-    # 0. 如果已经在最终播放器内了，直接返回
+    # 0. 检查最终播放器
     final_modal_indicators = [
         "//*[contains(text(), 'Progress')]",
         "//*[contains(text(), 'Watch') and contains(text(), 'ads to start')]",
@@ -403,7 +423,6 @@ def ensure_inside_ads_modal(driver):
         except Exception:
             pass
 
-    # 包含多种可能性（兼容按钮或a标签）的绿色确认按钮
     confirm_xpaths = [
         "//button[contains(., 'Watch Ads') or contains(., 'Watch ads')]",
         "//a[contains(., 'Watch Ads') or contains(., 'Watch ads')]",
@@ -424,31 +443,30 @@ def ensure_inside_ads_modal(driver):
                 pass
         return False
 
-    # 1. 尝试直接点击现成的绿色确认弹窗
+    # 1. 尝试确认弹窗
     if try_click_confirm_modal():
         return True
 
-    # 2. 如果没弹窗，就去点击 [+ Extend]
+    # 2. 从头开始，点击 [+ Extend]
     try:
         extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend') and not(@disabled)]")
         if extend_btns:
             for eb in extend_btns:
                 if eb.is_displayed():
                     print("  ℹ️ 点击面板上的 [+ Extend] 触发续期...", flush=True)
-                    # 【核心修复】：增加三连击机制。点一次，等5秒，如果不出来，再点！防止点击被透明遮罩吃掉！
                     for attempt in range(3):
                         physical_click_trusted(driver, eb)
-                        print(f"  ⏳ 正在等待确认弹窗加载 (尝试 {attempt+1}/3)...", flush=True)
+                        print(f"  ⏳ 等待确认弹窗 (尝试 {attempt+1}/3)...", flush=True)
                         for _ in range(5):
                             time.sleep(1)
                             if try_click_confirm_modal():
                                 return True
-                    print("  ⚠️ 三次尝试点击 [+ Extend] 均未见弹窗，可能被严重遮挡！", flush=True)
+                    print("  ⚠️ 三次尝试点击 [+ Extend] 均未见弹窗！", flush=True)
                     return False
     except Exception:
         pass
 
-    # 3. 如果是关机状态，尝试点击 Start 唤醒
+    # 3. 离线唤醒
     try:
         start_btns = driver.find_elements(
             By.XPATH,
@@ -457,10 +475,10 @@ def ensure_inside_ads_modal(driver):
         if start_btns:
             for sb in start_btns:
                 if sb.is_displayed():
-                    print(f"  ℹ️ 服务器离线，点击 [{sb.text.strip()}] 唤醒控制台...", flush=True)
+                    print(f"  ℹ️ 服务器离线，点击 [{sb.text.strip()}] 唤醒...", flush=True)
                     for attempt in range(3):
                         physical_click_trusted(driver, sb)
-                        print(f"  ⏳ 正在等待确认弹窗加载 (尝试 {attempt+1}/3)...", flush=True)
+                        print(f"  ⏳ 等待确认弹窗 (尝试 {attempt+1}/3)...", flush=True)
                         for _ in range(5):
                             time.sleep(1)
                             if try_click_confirm_modal():
@@ -471,7 +489,6 @@ def ensure_inside_ads_modal(driver):
 
 
 def click_watch_ad_everywhere(driver) -> bool:
-    """仅在最终的广告播放器中寻找真正的【看广告】按钮"""
     xpaths = [
         "//button[normalize-space(.)='Watch ad' or text()='Watch ad']",
         "//button[contains(translate(., 'AD', 'ad'), 'watch ad')]",
@@ -584,6 +601,7 @@ def main():
             time.sleep(1)
             driver.get(SERVER_CONSOLE_URL)
             time.sleep(8)
+            nuke_overlay_ads(driver)
             dismiss_pwa_popups(driver)
 
             if "/login" not in driver.current_url.lower():
@@ -600,6 +618,7 @@ def main():
                 return
             driver.get(SERVER_CONSOLE_URL)
             time.sleep(8)
+            nuke_overlay_ads(driver)
             dismiss_pwa_popups(driver)
 
         expire_info_before, init_sec, init_prog = get_expire_and_progress(driver)
@@ -612,6 +631,9 @@ def main():
         completed = 0
         for current_ad in range(1, 5):
             print(f"\n🎬 === 正在执行第 {current_ad}/4 轮广告 ===", flush=True)
+            
+            # 先给网页洗个澡，清理掉所有的遮挡物
+            nuke_overlay_ads(driver)
             
             # 使用穿透点击与重试的确保弹窗逻辑
             ensure_inside_ads_modal(driver)
@@ -649,6 +671,7 @@ def main():
         driver.switch_to.default_content()
         driver.refresh()
         time.sleep(8)
+        nuke_overlay_ads(driver)
         dismiss_pwa_popups(driver)
         dismiss_unlock_modal(driver)
 
