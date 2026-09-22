@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 终极自动续期脚本 (账号密码自动破盾 + Cookie注入 + gost代理 + 4轮广告)
+# VOER Host 终极自动续期脚本 (修复连点循环BUG + 4轮广告统一)
 # ============================================================
 import html
 import json
@@ -392,31 +392,27 @@ def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bo
 
 
 def ensure_inside_ads_modal(driver):
+    """确保对话框已打开。如果已打开，则不执行任何操作。"""
     driver.switch_to.default_content()
     dismiss_unlock_modal(driver)
 
+    # 1. 检查是否已经在弹窗内了
     watch_ads_xpath = "//button[contains(., 'Watch Ads') or contains(., 'Watch ad')]"
     confirm_btns = driver.find_elements(By.XPATH, watch_ads_xpath)
     for b in confirm_btns:
-        if b.is_displayed() and "watch ads" in b.text.strip().lower():
-            print("  ℹ️ 处于对话框内，点击 [Watch Ads]...", flush=True)
-            physical_click_trusted(driver, b)
-            time.sleep(3)
+        if b.is_displayed():
+            print("  ℹ️ 续期对话框已处于打开状态。", flush=True)
             return
 
+    # 2. 如果没开，则去找 Extend 按钮点击
     extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend') and not(@disabled)]")
     if extend_btns and extend_btns[0].is_displayed():
-        print("  ℹ️ 点击 [+ Extend] 触发续期...", flush=True)
+        print("  ℹ️ 点击 [+ Extend] 触发续期弹窗...", flush=True)
         physical_click_trusted(driver, extend_btns[0])
-        time.sleep(2)
-        c_btns = driver.find_elements(By.XPATH, watch_ads_xpath)
-        for b in c_btns:
-            if b.is_displayed():
-                physical_click_trusted(driver, b)
-                time.sleep(3)
-                break
+        time.sleep(3)
         return
 
+    # 3. 如果是关机状态，去找 Start / Recover 点击
     start_btns = driver.find_elements(
         By.XPATH,
         "//button[(contains(., 'Start') or contains(., '开始') or contains(., 'Recover')) and not(@disabled)]"
@@ -430,11 +426,13 @@ def ensure_inside_ads_modal(driver):
 
 
 def click_watch_ad_everywhere(driver) -> bool:
+    """在弹窗内寻找并点击实际播放广告的 Watch Ads 按钮"""
     xpaths = [
         "//button[normalize-space(.)='Watch ad' or text()='Watch ad']",
         "//button[contains(translate(., 'AD', 'ad'), 'watch ad')]",
         "//div[contains(., 'Rewarded ad')]//button[contains(., 'Watch')]",
         "//*[contains(text(), 'Ready for Voer')]",
+        "//button[contains(., 'Watch Ads')]"  # 包含弹窗本身的 Watch Ads 按钮
     ]
     driver.switch_to.default_content()
     return recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=3)
@@ -574,11 +572,13 @@ def main():
         completed = 0
         for current_ad in range(1, 5):
             print(f"\n🎬 === 正在执行第 {current_ad}/4 轮广告 ===", flush=True)
+            
+            # 【修复点】：每轮只在开始时确保弹窗打开，不在下方 35 秒等待循环里重复调用
             ensure_inside_ads_modal(driver)
 
             clicked = False
             for sec in range(35):
-                ensure_inside_ads_modal(driver)
+                # 弹窗已经确认打开，此处只负责寻找弹出的视频广告播放按钮并点击
                 if click_watch_ad_everywhere(driver):
                     print(f"  🎯 第 {sec + 1} 秒击发第 {current_ad} 轮 [Watch ad]！", flush=True)
                     clicked = True
