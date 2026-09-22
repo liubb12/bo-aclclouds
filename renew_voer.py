@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 终极自动续期脚本 (账号密码自动破盾 + Cookie注入 + gost代理 + 3轮广告)
+# VOER Host 终极自动续期脚本 (账号密码自动破盾 + Cookie注入 + gost代理 + 4轮广告)
 # ============================================================
 import html
 import json
@@ -570,10 +570,10 @@ def main():
             print(f"💡 剩余时间充裕（约 {round(init_sec / 3600, 1)} 小时），跳过看广告。", flush=True)
             return
 
-        # 4. 执行 3 轮看广告流程
+        # 4. 执行 4 轮看广告流程
         completed = 0
-        for current_ad in range(1, 4):
-            print(f"\n🎬 === 正在执行第 {current_ad}/3 轮广告 ===", flush=True)
+        for current_ad in range(1, 5):
+            print(f"\n🎬 === 正在执行第 {current_ad}/4 轮广告 ===", flush=True)
             ensure_inside_ads_modal(driver)
 
             clicked = False
@@ -619,7 +619,7 @@ def main():
 
         tg_send(
             f"📋 <b>VOER Host 自动续期汇总</b>\n\n"
-            f"🎬 <b>观看广告：</b><code>{completed}/3</code> 轮\n"
+            f"🎬 <b>观看广告：</b><code>{completed}/4</code> 轮\n"
             f"⏳ <b>到期变动：</b><code>{html.escape(expire_info_before)}</code> ➜ <code>{html.escape(expire_info_after)}</code>\n"
             f"📊 <b>今日进度：</b><code>{html.escape(final_prog)}</code>\n"
             f"⏰ <b>执行时间：</b><code>{now}</code>",
