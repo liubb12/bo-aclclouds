@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# VOER Host 终极自动续期脚本 (修复连点循环BUG + 4轮广告统一)
+# VOER Host 终极自动续期脚本 (适配 Extend Session 二次确认弹窗)
 # ============================================================
 import html
 import json
@@ -211,7 +211,6 @@ def restore_session_data(driver, credential_str: str, domain=".voer.host"):
 
 
 def handle_turnstile_and_login(driver, email: str, password: str) -> bool:
-    """当会话失效时，自动使用邮箱密码登录并通过 Cloudflare Turnstile"""
     if not email or not password:
         print("  ⚠️ 未配置 VOER_EMAIL / VOER_PASSWORD，无法自动执行账号密码登录。")
         return False
@@ -220,7 +219,6 @@ def handle_turnstile_and_login(driver, email: str, password: str) -> bool:
     driver.get(LOGIN_URL)
     time.sleep(4)
 
-    # 1. 尝试破解并点击 Turnstile
     for _ in range(4):
         try:
             driver.uc_gui_click_captcha()
@@ -230,7 +228,6 @@ def handle_turnstile_and_login(driver, email: str, password: str) -> bool:
         except Exception:
             time.sleep(2)
 
-    # 2. 填写邮箱
     email_selectors = ["#login-email", 'input[name="email"]', 'input[type="email"]']
     for sel in email_selectors:
         try:
@@ -243,7 +240,6 @@ def handle_turnstile_and_login(driver, email: str, password: str) -> bool:
         except Exception:
             continue
 
-    # 3. 填写密码
     pw_selectors = ["#login-password", 'input[name="password"]', 'input[type="password"]']
     for sel in pw_selectors:
         try:
@@ -258,7 +254,6 @@ def handle_turnstile_and_login(driver, email: str, password: str) -> bool:
 
     time.sleep(1)
 
-    # 4. 点击登录提交
     login_btn_xpaths = [
         "//button[contains(., 'Sign in') or contains(., 'Login') or contains(., '登录')]",
         "//button[@type='submit']"
@@ -274,20 +269,17 @@ def handle_turnstile_and_login(driver, email: str, password: str) -> bool:
         except Exception:
             continue
 
-    # 5. 等待登录跳转完成并同步最新凭据
     for _ in range(12):
         time.sleep(2)
         url = driver.current_url.lower()
         if "/login" not in url:
             print(f"  🎉 登录成功，跳转至: {driver.current_url}")
-            # 获取新 token 并存入环境
             try:
                 cookies = driver.get_cookies()
                 for c in cookies:
                     if c.get("name") == "token" and c.get("value"):
                         new_t = c["value"].strip()
                         print(f"  🔑 提取到全新 Token: {new_t[:10]}...")
-                        # 写入 GITHUB_ENV 供后续复用
                         gh_env = os.environ.get("GITHUB_ENV")
                         if gh_env and os.path.exists(gh_env):
                             with open(gh_env, "a") as f:
@@ -392,47 +384,94 @@ def recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=4) -> bo
 
 
 def ensure_inside_ads_modal(driver):
-    """确保对话框已打开。如果已打开，则不执行任何操作。"""
+    """三段式判断：最终播放器 -> 中间确认框 -> 面板上的 Extend 按钮"""
     driver.switch_to.default_content()
     dismiss_unlock_modal(driver)
 
-    # 1. 检查是否已经在弹窗内了
-    watch_ads_xpath = "//button[contains(., 'Watch Ads') or contains(., 'Watch ad')]"
-    confirm_btns = driver.find_elements(By.XPATH, watch_ads_xpath)
-    for b in confirm_btns:
-        if b.is_displayed():
-            print("  ℹ️ 续期对话框已处于打开状态。", flush=True)
-            return
+    # 第一段：0. 判断最终的广告播放器（带 Progress 的页面）是否已经打开
+    final_modal_indicators = [
+        "//*[contains(text(), 'Progress')]",
+        "//*[contains(text(), 'Watch') and contains(text(), 'ads to start')]",
+        "//*[contains(text(), 'Finding ad')]",
+        "//*[contains(text(), 'Rewarded ad')]"
+    ]
+    for ind in final_modal_indicators:
+        try:
+            elems = driver.find_elements(By.XPATH, ind)
+            for el in elems:
+                if el.is_displayed():
+                    print("  ℹ️ 最终广告播放器已就绪，等待获取广告...", flush=True)
+                    return  # 直接返回，防止连点
+        except Exception:
+            pass
 
-    # 2. 如果没开，则去找 Extend 按钮点击
-    extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend') and not(@disabled)]")
-    if extend_btns and extend_btns[0].is_displayed():
-        print("  ℹ️ 点击 [+ Extend] 触发续期弹窗...", flush=True)
-        physical_click_trusted(driver, extend_btns[0])
-        time.sleep(3)
-        return
+    # 第二段：1. 判断是否卡在 "Extend Session" 确认弹窗（绿色的 ✓ Watch Ads）
+    confirm_xpath = "//button[contains(., 'Watch Ads')]"
+    try:
+        confirm_btns = driver.find_elements(By.XPATH, confirm_xpath)
+        for b in confirm_btns:
+            if b.is_displayed():
+                print("  ℹ️ 发现 [Extend Session] 确认弹窗，点击绿色 [✓ Watch Ads] 按钮...", flush=True)
+                physical_click_trusted(driver, b)
+                time.sleep(4)
+                return
+    except Exception:
+        pass
 
-    # 3. 如果是关机状态，去找 Start / Recover 点击
-    start_btns = driver.find_elements(
-        By.XPATH,
-        "//button[(contains(., 'Start') or contains(., '开始') or contains(., 'Recover')) and not(@disabled)]"
-    )
-    if start_btns and start_btns[0].is_displayed():
-        print(f"  ℹ️ 服务器离线，点击 [{start_btns[0].text.strip()}] 唤醒看广告弹窗...", flush=True)
-        physical_click_trusted(driver, start_btns[0])
-        time.sleep(4)
-        dismiss_unlock_modal(driver)
-        return
+    # 第三段：2. 如果什么都没开，尝试点击面板上的 [+ Extend]
+    try:
+        extend_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Extend') and not(@disabled)]")
+        if extend_btns:
+            for eb in extend_btns:
+                if eb.is_displayed():
+                    print("  ℹ️ 点击面板上的 [+ Extend] 触发续期...", flush=True)
+                    physical_click_trusted(driver, eb)
+                    time.sleep(3)
+                    # 点完肯定出中间弹窗，马上再寻找并点击绿色的 Watch Ads
+                    c_btns = driver.find_elements(By.XPATH, confirm_xpath)
+                    for cb in c_btns:
+                        if cb.is_displayed():
+                            print("  ℹ️ 点击确认弹窗的 [✓ Watch Ads] 按钮进入播放器...", flush=True)
+                            physical_click_trusted(driver, cb)
+                            time.sleep(4)
+                            return
+                    return
+    except Exception:
+        pass
+
+    # 第四段：3. 尝试离线开机 Start
+    try:
+        start_btns = driver.find_elements(
+            By.XPATH,
+            "//button[(contains(., 'Start') or contains(., '开始') or contains(., 'Recover')) and not(@disabled)]"
+        )
+        if start_btns:
+            for sb in start_btns:
+                if sb.is_displayed():
+                    print(f"  ℹ️ 服务器离线，点击 [{sb.text.strip()}] 唤醒控制台...", flush=True)
+                    physical_click_trusted(driver, sb)
+                    time.sleep(4)
+                    dismiss_unlock_modal(driver)
+                    # 点完有可能出中间弹窗
+                    c_btns = driver.find_elements(By.XPATH, confirm_xpath)
+                    for cb in c_btns:
+                        if cb.is_displayed():
+                            print("  ℹ️ 点击确认弹窗的 [✓ Watch Ads] 按钮进入播放器...", flush=True)
+                            physical_click_trusted(driver, cb)
+                            time.sleep(4)
+                            return
+                    return
+    except Exception:
+        pass
 
 
 def click_watch_ad_everywhere(driver) -> bool:
-    """在弹窗内寻找并点击实际播放广告的 Watch Ads 按钮"""
+    """仅在最终的广告播放器中寻找真正的【看广告】按钮，不与绿色确认键冲突"""
     xpaths = [
         "//button[normalize-space(.)='Watch ad' or text()='Watch ad']",
         "//button[contains(translate(., 'AD', 'ad'), 'watch ad')]",
         "//div[contains(., 'Rewarded ad')]//button[contains(., 'Watch')]",
-        "//*[contains(text(), 'Ready for Voer')]",
-        "//button[contains(., 'Watch Ads')]"  # 包含弹窗本身的 Watch Ads 按钮
+        "//*[contains(text(), 'Ready for Voer')]"
     ]
     driver.switch_to.default_content()
     return recursive_find_and_click(driver, xpaths, current_depth=0, max_depth=3)
@@ -573,12 +612,12 @@ def main():
         for current_ad in range(1, 5):
             print(f"\n🎬 === 正在执行第 {current_ad}/4 轮广告 ===", flush=True)
             
-            # 【修复点】：每轮只在开始时确保弹窗打开，不在下方 35 秒等待循环里重复调用
+            # 智能判断打开状态，自动穿透中间确认弹窗
             ensure_inside_ads_modal(driver)
 
             clicked = False
             for sec in range(35):
-                # 弹窗已经确认打开，此处只负责寻找弹出的视频广告播放按钮并点击
+                # 只点击最终播放器里的 Watch ad
                 if click_watch_ad_everywhere(driver):
                     print(f"  🎯 第 {sec + 1} 秒击发第 {current_ad} 轮 [Watch ad]！", flush=True)
                     clicked = True
