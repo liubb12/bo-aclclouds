@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动巡检与智能续期引擎 (修复带图标按钮定位漏洞版)
+# EKNodes 自动巡检与智能续期引擎 (硬破 Vercel 拦截盾版)
 # ============================================================
 import html
 import json
@@ -222,13 +222,30 @@ def perform_browser_renew():
                     pass
 
         print(f"🚀 直达服务器列表页: {SERVERS_URL} ...", flush=True)
-        driver.get(SERVERS_URL)
+        # 【核心修复】：千万不能用 driver.get，必须用 UC 模式伪装打开，防止触发 Vercel 盾！
+        driver.uc_open_with_reconnect(SERVERS_URL, reconnect_time=6)
+        
+        # 针对 Vercel 盾的二次检测与击破
+        for _ in range(4):
+            time.sleep(2)
+            try:
+                src = driver.page_source
+                if "Failed to verify your browser" in src or "Vercel Security" in src:
+                    print("🛡️ 遭遇 Vercel 拦截盾，尝试模拟点击破盾...", flush=True)
+                    try:
+                        driver.uc_gui_click_captcha()
+                    except:
+                        pass
+                    time.sleep(4)
+                else:
+                    break
+            except:
+                pass
         
         print("⏳ 正在等待页面渲染并寻找续期按钮...", flush=True)
         target_btn = None
         for _ in range(20):
             time.sleep(1)
-            # 【核心修复】：放弃死板的 text()，使用 . 兼容带有图标 <i> 的按钮
             xpaths = [
                 "//button[contains(., 'RENOVAR') or contains(., 'Renovar') or contains(., 'RENEW') or contains(., 'Renew')]",
                 "//a[contains(., 'RENOVAR') or contains(., 'Renovar') or contains(., 'RENEW') or contains(., 'Renew')]"
@@ -273,7 +290,6 @@ def perform_browser_renew():
         for _ in range(15):
             time.sleep(1)
             try:
-                # 【核心修复】：确认按钮同样使用宽容匹配，防变阵
                 c_xpaths = [
                     "//button[contains(., 'CONFIRMAR') or contains(., 'Confirmar') or contains(., 'CONFIRM') or contains(., 'Confirm')]"
                 ]
@@ -384,7 +400,6 @@ def main():
 
         card_img_path = generate_status_image(server_name, status_tag, exp_date, node_ip)
 
-        # 只要剩余时间 <= 3，就会触发续期流程
         if days_left > 3 and not FORCE_RENEW:
             print(f"ℹ️ 剩余天数（{days_left} 天）充裕，无需执行续期。", flush=True)
             result_tag = f"周期充足 ({days_left}天)，无需续期"
