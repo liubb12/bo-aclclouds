@@ -33,6 +33,7 @@ jobs:
       - name: Start xray (dedicated proxy)
         env:
           XRAY_CONFIG: ${{ secrets.EK_XRAY_CONFIG }}
+          QUIC_GO_DISABLE_GSO: "1"
         run: |
           echo "$XRAY_CONFIG" > /tmp/xray_config.json
           echo "--- JSON 校验 ---"
