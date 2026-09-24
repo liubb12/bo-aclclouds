@@ -17,6 +17,10 @@
 # --- v2.1 ---
 #  8. 429/5xx 自动重试 (60s → 120s → 300s)
 #  9. 按状态码给精准提示: 429=限流 / 401/403=Cookie 失效
+# --- v2.2 ---
+# 10. 页面抓取改用 curl_cffi (Chrome TLS 指纹): 多 IP 连续 429 说明
+#     Vercel 按请求指纹限流, requests 的 TLS 特征太容易被识别
+# 11. 429 时打印页面片段, 方便判断是限流还是 WAF 挑战页
 # ------------------------------------------------------------
 # GitHub Actions 运行要求:
 #  - 安装 gost (仅当使用 SOCKS5_PROXY 时)
@@ -33,6 +37,13 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 from PIL import Image, ImageDraw
+
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CFFI = True
+except ImportError:
+    cffi_requests = None
+    HAS_CFFI = False
 
 BASE_URL = "https://dash.eknodes.es"
 SERVERS_URL = f"{BASE_URL}/servers"
@@ -237,7 +248,7 @@ def parse_server_page(html_text: str) -> dict:
     return {"name": server_name, "exp": exp_date, "ip": node_ip, "status": status_tag}
 
 
-def fetch_server_page(session: requests.Session) -> str:
+def fetch_server_page(session) -> str:
     """带登录态校验 + 429/5xx 自动重试的页面抓取。"""
     resp = None
     for attempt in range(len(RETRY_WAITS) + 1):
@@ -257,9 +268,11 @@ def fetch_server_page(session: requests.Session) -> str:
     if "login" in resp.url.lower():
         raise NotLoggedInError("被重定向到登录页, EK_COOKIE 可能已失效, 请更新 Secrets")
     if resp.status_code == 429:
+        snippet = (resp.text or "")[:300].replace("\n", " ")
+        print(f"429 页面片段: {snippet}", flush=True)
         raise EKError(
-            "服务器列表返回 HTTP 429 (限流): 出口 IP 被限流。"
-            "建议: 降低巡检频率 / 更换代理 IP / 临时直连测试一次确认"
+            "服务器列表返回 HTTP 429 (限流)。"
+            "建议: 降低巡检频率 / 更换代理 IP / 检查是否为按指纹限流"
         )
     if resp.status_code in (401, 403):
         raise NotLoggedInError(
@@ -523,7 +536,12 @@ def main():
         except Exception as e:
             print(f"代理启动异常: {e}, 请求与浏览器都将采用直连。", flush=True)
 
-    session = requests.Session()
+    if HAS_CFFI:
+        session = cffi_requests.Session(impersonate="chrome")
+        print("抓取已启用 Chrome TLS 指纹 (curl_cffi)。", flush=True)
+    else:
+        session = requests.Session()
+        print("警告: 未安装 curl_cffi, 回退 requests (TLS 指纹易被识别)。", flush=True)
     if proxies:
         session.proxies.update(proxies)
 
