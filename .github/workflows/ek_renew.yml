@@ -51,6 +51,7 @@ jobs:
           echo "直连 HTTP_CODE=$DIRECT_CODE (预期 429=被 Vercel 拦截, 对照用)"
           echo "--- 代理自检: 经代理访问真实目标 ---"
           PROXY_CODE=$(curl -s -o /tmp/probe.html -w "%{http_code}" --max-time 25 -x http://127.0.0.1:18080 https://dash.eknodes.es/servers) || PROXY_CODE="000"
+          echo "出口 IP (经代理): $(curl -s --max-time 15 -x http://127.0.0.1:18080 https://api.ip.sb/ip || echo '获取失败')"
           echo "代理 HTTP_CODE=$PROXY_CODE"
           echo "页面标题: $(grep -o '<title>[^<]*</title>' /tmp/probe.html 2>/dev/null | head -1)"
           if [ "$PROXY_CODE" = "000" ]; then
@@ -71,6 +72,7 @@ jobs:
         env:
           EK_COOKIE: ${{ secrets.EK_COOKIE }}
           HTTP_PROXY_URL: http://127.0.0.1:18080
+          BROWSER_FIRST: "1"
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
