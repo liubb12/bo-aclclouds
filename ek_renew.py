@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动巡检与智能续期引擎 (纯 API 巡检 + 真实弹窗精准交互版)
+# EKNodes 自动巡检与智能续期引擎 (修复带图标按钮定位漏洞版)
 # ============================================================
 import html
 import json
@@ -203,6 +203,9 @@ def perform_browser_renew():
     print("⚡ 启动浏览器进行真实模态框交互续期...", flush=True)
     uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}" if SOCKS5_PROXY else None
     driver = Driver(uc=True, headless=False, proxy=uc_proxy, uc_subprocess=True)
+    
+    if os.path.exists("real_browser_error.png"):
+        os.remove("real_browser_error.png")
 
     try:
         driver.uc_open_with_reconnect(BASE_URL, reconnect_time=4)
@@ -220,17 +223,34 @@ def perform_browser_renew():
 
         print(f"🚀 直达服务器列表页: {SERVERS_URL} ...", flush=True)
         driver.get(SERVERS_URL)
-        time.sleep(5)
+        
+        print("⏳ 正在等待页面渲染并寻找续期按钮...", flush=True)
+        target_btn = None
+        for _ in range(20):
+            time.sleep(1)
+            # 【核心修复】：放弃死板的 text()，使用 . 兼容带有图标 <i> 的按钮
+            xpaths = [
+                "//button[contains(., 'RENOVAR') or contains(., 'Renovar') or contains(., 'RENEW') or contains(., 'Renew')]",
+                "//a[contains(., 'RENOVAR') or contains(., 'Renovar') or contains(., 'RENEW') or contains(., 'Renew')]"
+            ]
+            for xp in xpaths:
+                try:
+                    elems = driver.find_elements(By.XPATH, xp)
+                    for el in elems:
+                        if el.is_displayed() and len(el.text.strip()) < 30:
+                            target_btn = el
+                            break
+                except Exception:
+                    pass
+            if target_btn:
+                break
 
-        renovar_btns = driver.find_elements(
-            By.XPATH, 
-            "//button[contains(., 'RENOVAR') or .//text()[contains(., 'RENOVAR')]]"
-        )
-        if not renovar_btns:
-            return False, "未找到 RENOVAR 续期按钮"
+        if not target_btn:
+            driver.save_screenshot("real_browser_error.png")
+            return False, "未找到 RENOVAR/RENEW 续期按钮 (已抓拍真实截图)"
 
-        print("👉 点击卡片上的 RENOVAR 唤出弹窗...", flush=True)
-        physical_click(driver, renovar_btns[0])
+        print(f"👉 成功找到 [{target_btn.text.strip()}] 按钮，点击唤出弹窗...", flush=True)
+        physical_click(driver, target_btn)
         time.sleep(3)
 
         print("🛡️ 正在探测并协助模态框内 Turnstile 验证...", flush=True)
@@ -249,21 +269,42 @@ def perform_browser_renew():
                 pass
             time.sleep(2)
 
-        confirm_btns = driver.find_elements(
-            By.XPATH, 
-            "//button[contains(., 'CONFIRMAR RENOVACIÓN') or contains(., 'Confirmar')]"
-        )
-        if not confirm_btns:
-            return False, "未找到 CONFIRMAR RENOVACIÓN 确认按钮"
+        confirm_btn = None
+        for _ in range(15):
+            time.sleep(1)
+            try:
+                # 【核心修复】：确认按钮同样使用宽容匹配，防变阵
+                c_xpaths = [
+                    "//button[contains(., 'CONFIRMAR') or contains(., 'Confirmar') or contains(., 'CONFIRM') or contains(., 'Confirm')]"
+                ]
+                for cx in c_xpaths:
+                    c_btns = driver.find_elements(By.XPATH, cx)
+                    for cb in c_btns:
+                        if cb.is_displayed() and len(cb.text.strip()) < 40:
+                            confirm_btn = cb
+                            break
+                    if confirm_btn:
+                        break
+            except Exception:
+                pass
+            if confirm_btn:
+                break
 
-        target_btn = confirm_btns[0]
+        if not confirm_btn:
+            driver.save_screenshot("real_browser_error.png")
+            return False, "未找到 CONFIRMAR 确认按钮 (已抓拍真实截图)"
+
         time.sleep(1)
-        print("🎯 执行物理点击 CONFIRMAR RENOVACIÓN 按钮...", flush=True)
-        physical_click(driver, target_btn)
+        print(f"🎯 执行物理点击 [{confirm_btn.text.strip()}] 按钮...", flush=True)
+        physical_click(driver, confirm_btn)
         time.sleep(6)
 
         return True, "已成功提交续期申请"
     except Exception as e:
+        try:
+            driver.save_screenshot("real_browser_error.png")
+        except:
+            pass
         return False, str(e)
     finally:
         driver.quit()
@@ -343,13 +384,20 @@ def main():
 
         card_img_path = generate_status_image(server_name, status_tag, exp_date, node_ip)
 
+        # 只要剩余时间 <= 3，就会触发续期流程
         if days_left > 3 and not FORCE_RENEW:
             print(f"ℹ️ 剩余天数（{days_left} 天）充裕，无需执行续期。", flush=True)
             result_tag = f"周期充足 ({days_left}天)，无需续期"
+            final_photo = card_img_path
         else:
             print(f"⚡ 剩余天数（{days_left} 天）已进入可续期区间，触发续期流程...", flush=True)
             ok, msg = perform_browser_renew()
-            result_tag = "✅ 续期完成 (+7天)" if ok else f"⚠️ 续期动作反馈: {msg}"
+            if ok:
+                result_tag = "✅ 续期完成 (+7天)"
+                final_photo = card_img_path
+            else:
+                result_tag = f"⚠️ {msg}"
+                final_photo = "real_browser_error.png" if os.path.exists("real_browser_error.png") else card_img_path
 
         tg_send(
             f"🛡️ <b>EKNodes 服务器巡检与续期报告</b>\n\n"
@@ -357,7 +405,7 @@ def main():
             f"🌐 <b>连接地址：</b><code>{node_ip}</code>\n"
             f"⏭️ <b>执行结果：</b><code>{result_tag}</code>\n"
             f"⏰ <b>巡检时间：</b><code>{now_time}</code>",
-            photo_path=card_img_path
+            photo_path=final_photo
         )
         print("🎉 流程全部完成，通知已推送到 Telegram！", flush=True)
 
