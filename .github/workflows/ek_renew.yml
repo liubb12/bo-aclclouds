@@ -23,13 +23,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb
 
-      - name: Install gost (Proxy)
-        run: |
-          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
-          gzip -d gost-linux-amd64-2.11.5.gz
-          chmod +x gost-linux-amd64-2.11.5
-          sudo mv gost-linux-amd64-2.11.5 /usr/local/bin/gost
-
       - name: Install xray (VMess/HY2 -> SOCKS5)
         run: |
           XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
@@ -51,7 +44,8 @@ jobs:
           echo "--- xray 启动日志 ---"
           cat /tmp/xray.log
           echo "--- 代理自检 (verbose) ---"
-          curl -v --max-time 15 -x socks5h://127.0.0.1:11808 https://httpbin.org/ip || true
+          curl -s --max-time 10 -x socks5h://127.0.0.1:11808 https://httpbin.org/ip && echo "xray socks OK"
+          curl -s --max-time 10 -x http://127.0.0.1:18080 https://httpbin.org/ip && echo "xray http OK"
 
       - name: Install Python Dependencies
         run: |
@@ -61,7 +55,7 @@ jobs:
       - name: Run EKNodes Renew Script
         env:
           EK_COOKIE: ${{ secrets.EK_COOKIE }}
-          SOCKS5_PROXY: 127.0.0.1:11808
+          HTTP_PROXY_URL: http://127.0.0.1:18080
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
