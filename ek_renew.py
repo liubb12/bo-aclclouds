@@ -14,6 +14,9 @@
 #  5. 登录态校验: 检查重定向到登录页 / WAF 拦截页 / 非 200 状态
 #  6. Turnstile 30 秒未通过则直接失败, 不再盲点确认按钮
 #  7. 状态卡片去掉写死的 CPU/RAM/磁盘假数据, 改为真实剩余天数
+# --- v2.1 ---
+#  8. 429/5xx 自动重试 (60s → 120s → 300s)
+#  9. 按状态码给精准提示: 429=限流 / 401/403=Cookie 失效
 # ------------------------------------------------------------
 # GitHub Actions 运行要求:
 #  - 安装 gost (仅当使用 SOCKS5_PROXY 时)
@@ -41,6 +44,9 @@ EK_COOKIE = os.environ.get("EK_COOKIE", "").strip()
 SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
 FORCE_RENEW = os.environ.get("FORCE_RENEW", "false").lower() == "true"
 HEADLESS = os.environ.get("HEADLESS", "false").lower() == "true"
+
+RETRYABLE_STATUSES = (429, 500, 502, 503, 504)
+RETRY_WAITS = (60, 120, 300)  # 秒, 逐次递增
 
 WAF_MARKERS = (
     "Failed to verify your browser",
@@ -232,15 +238,33 @@ def parse_server_page(html_text: str) -> dict:
 
 
 def fetch_server_page(session: requests.Session) -> str:
-    """带登录态校验的页面抓取。"""
-    try:
-        resp = session.get(SERVERS_URL, timeout=20)
-    except Exception as e:
-        raise EKError(f"请求服务器列表失败: {e}")
-    print(f"HTTP {resp.status_code} | 最终地址: {resp.url} | 长度: {len(resp.text)}", flush=True)
+    """带登录态校验 + 429/5xx 自动重试的页面抓取。"""
+    resp = None
+    for attempt in range(len(RETRY_WAITS) + 1):
+        try:
+            resp = session.get(SERVERS_URL, timeout=20)
+        except Exception as e:
+            raise EKError(f"请求服务器列表失败: {e}")
+        print(f"HTTP {resp.status_code} | 最终地址: {resp.url} | 长度: {len(resp.text)}", flush=True)
+        if resp.status_code in RETRYABLE_STATUSES and attempt < len(RETRY_WAITS):
+            wait = RETRY_WAITS[attempt]
+            print(f"命中 HTTP {resp.status_code}, {wait} 秒后重试 ({attempt + 1}/{len(RETRY_WAITS)})...",
+                  flush=True)
+            time.sleep(wait)
+            continue
+        break
 
     if "login" in resp.url.lower():
         raise NotLoggedInError("被重定向到登录页, EK_COOKIE 可能已失效, 请更新 Secrets")
+    if resp.status_code == 429:
+        raise EKError(
+            "服务器列表返回 HTTP 429 (限流): 出口 IP 被限流。"
+            "建议: 降低巡检频率 / 更换代理 IP / 临时直连测试一次确认"
+        )
+    if resp.status_code in (401, 403):
+        raise NotLoggedInError(
+            f"服务器列表返回 HTTP {resp.status_code}, EK_COOKIE 可能已失效, 请更新 Secrets"
+        )
     if resp.status_code != 200:
         raise EKError(f"服务器列表返回 HTTP {resp.status_code}")
     for marker in WAF_MARKERS:
@@ -567,7 +591,7 @@ def main():
     except EKError as e:
         err = str(e)
         print(f"执行异常: {err}", flush=True)
-        tg_send(f"<b>EKNodes 巡检异常</b>\n\n<code>{html.escape(err)}</code>\n\n请检查 EK_COOKIE 或页面结构。")
+        tg_send(f"<b>EKNodes 巡检异常</b>\n\n<code>{html.escape(err)}</code>")
     except Exception as e:
         err = str(e)
         print(f"未知异常: {err}", flush=True)
