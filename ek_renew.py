@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动巡检与智能续期引擎 (修复版 v2.4)
+# EKNodes 自动巡检与智能续期引擎 (修复版 v2.5)
 # ------------------------------------------------------------
 # 相对 v1 的修复:
 #  1. 代理状态统一用 proxy_ready 标志: gost 启动失败时,
@@ -28,6 +28,10 @@
 # 13. Vercel 验证页浏览器闯关: curl 请求命中 "Vercel Security Checkpoint"
 #     时不再空等重试(机房 IP 等多久都解不开), 直接起真浏览器执行 JS 挑战,
 #     闯过后抓取页面源码继续原流程; 闯不过才按失败告警
+# --- v2.5 ---
+# 14. 复用已过验证的浏览器 (参考 SkyMC 脚本的单会话思路):
+#     验证页闯过后不关闭浏览器, 续期直接复用同一 driver,
+#     避免二次闯验证 (Vercel 通行 cookie 已在该会话中)
 # ------------------------------------------------------------
 # GitHub Actions 运行要求:
 #  - 安装 gost (仅当使用 SOCKS5_PROXY 时)
@@ -427,17 +431,24 @@ def find_button(driver, xpaths, timeout=20):
     return None
 
 
-def perform_browser_renew(cookies_dict, proxy_ready, old_exp_str, proxy_url=None):
-    """返回 (ok, msg, new_exp_str|None)。ok=True 仅当验证到期日确实延后。"""
+def perform_browser_renew(cookies_dict, proxy_ready, old_exp_str, proxy_url=None, existing_driver=None):
+    """返回 (ok, msg, new_exp_str|None)。ok=True 仅当验证到期日确实延后。
+    existing_driver: 复用已过验证的浏览器 (免二次闯验证), 传了就不负责 quit。"""
     from seleniumbase import Driver
 
-    print("启动浏览器进行续期...", flush=True)
     proxy = proxy_url if proxy_ready else None
-    if proxy:
-        print(f"浏览器走代理: {proxy}", flush=True)
+    if existing_driver is not None:
+        print("复用已通过验证的浏览器进行续期 (跳过二次验证)...", flush=True)
+        driver = existing_driver
+        own_driver = False
     else:
-        print("浏览器走直连", flush=True)
-    driver = Driver(uc=True, headless=HEADLESS, proxy=proxy, uc_subprocess=True)
+        print("启动浏览器进行续期...", flush=True)
+        if proxy:
+            print(f"浏览器走代理: {proxy}", flush=True)
+        else:
+            print("浏览器走直连", flush=True)
+        driver = Driver(uc=True, headless=HEADLESS, proxy=proxy, uc_subprocess=True)
+        own_driver = True
 
     if os.path.exists("real_browser_error.png"):
         os.remove("real_browser_error.png")
@@ -523,12 +534,17 @@ def perform_browser_renew(cookies_dict, proxy_ready, old_exp_str, proxy_url=None
             pass
         return False, f"浏览器续期异常: {e}", None
     finally:
-        driver.quit()
+        if own_driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
 
-def fetch_server_page_via_browser(cookies_dict, proxy_ready, proxy_url=None) -> str:
-    """真浏览器闯 Vercel 验证页并抓取服务器列表, 返回页面 HTML。
-    Vercel 验证页是 JS 挑战, curl 解不开但真浏览器有机会自动解开。"""
+def fetch_server_page_via_browser(cookies_dict, proxy_ready, proxy_url=None):
+    """真浏览器闯 Vercel 验证页并抓取服务器列表。
+    返回 (页面 HTML, driver): driver 保持打开, 后续续期可复用 (免二次闯验证)。
+    失败时 driver 已关闭并抛异常。"""
     from seleniumbase import Driver
 
     print("启动真浏览器闯 Vercel 验证页...", flush=True)
@@ -555,19 +571,20 @@ def fetch_server_page_via_browser(cookies_dict, proxy_ready, proxy_url=None) -> 
         if "login" in driver.current_url.lower():
             raise NotLoggedInError("浏览器被重定向到登录页, EK_COOKIE 可能已失效, 请更新 Secrets")
         print(f"验证页已通过, 页面长度: {len(src)}", flush=True)
-        return src
-    finally:
+        return src, driver
+    except Exception:
         try:
             driver.quit()
         except Exception:
             pass
+        raise
 
 
 # ---------------- 主流程 ----------------
 
 def main():
     print("=" * 45, flush=True)
-    print(" EKNodes 自动巡检与续期调度 (修复版 v2.4)", flush=True)
+    print(" EKNodes 自动巡检与续期调度 (修复版 v2.5)", flush=True)
     print("=" * 45, flush=True)
 
     if not EK_COOKIE:
@@ -576,6 +593,7 @@ def main():
 
     proxy_ready = False
     gost_proc = None
+    browser_driver = None
     proxies = None
     active_proxy_url = None
 
@@ -630,7 +648,7 @@ def main():
             html_text = fetch_server_page(session)
         except CheckpointBlockedError as cbe:
             print(f"{cbe}, 改用真浏览器抓取...", flush=True)
-            html_text = fetch_server_page_via_browser(cookies_dict, proxy_ready, active_proxy_url)
+            html_text, browser_driver = fetch_server_page_via_browser(cookies_dict, proxy_ready, active_proxy_url)
         info = parse_server_page(html_text)
 
         days_left = parse_days_remaining(info["exp"])
@@ -647,7 +665,9 @@ def main():
                 info["name"], info["status"], info["exp"], days_left, info["ip"], result_tag)
         else:
             print(f"剩余 {days_left} 天, 触发续期流程...", flush=True)
-            ok, msg, new_exp = perform_browser_renew(cookies_dict, proxy_ready, info["exp"], active_proxy_url)
+            ok, msg, new_exp = perform_browser_renew(
+                cookies_dict, proxy_ready, info["exp"], active_proxy_url,
+                existing_driver=browser_driver)
             if ok:
                 new_days = parse_days_remaining(new_exp)
                 result_tag = f"续期成功, 到期延至 {new_exp} (剩 {new_days} 天)"
@@ -682,6 +702,11 @@ def main():
         print(f"未知异常: {err}", flush=True)
         tg_send(f"<b>EKNodes 巡检未知异常</b>\n\n<code>{html.escape(err)}</code>")
     finally:
+        if browser_driver is not None:
+            try:
+                browser_driver.quit()
+            except Exception:
+                pass
         if gost_proc:
             gost_proc.terminate()
             print("gost 代理已退出。", flush=True)
