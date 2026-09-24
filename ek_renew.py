@@ -21,6 +21,9 @@
 # 10. 页面抓取改用 curl_cffi (Chrome TLS 指纹): 多 IP 连续 429 说明
 #     Vercel 按请求指纹限流, requests 的 TLS 特征太容易被识别
 # 11. 429 时打印页面片段, 方便判断是限流还是 WAF 挑战页
+# --- v2.3 ---
+# 12. 新增 HTTP_PROXY_URL: xray 等已直接提供 HTTP 代理时跳过 gost 中转
+#     (gost 2.11 太老, 多一层中转就多一个故障点); 浏览器改传真实代理地址
 # ------------------------------------------------------------
 # GitHub Actions 运行要求:
 #  - 安装 gost (仅当使用 SOCKS5_PROXY 时)
@@ -53,6 +56,7 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 EK_COOKIE = os.environ.get("EK_COOKIE", "").strip()
 SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
+HTTP_PROXY_URL = os.environ.get("HTTP_PROXY_URL", "").strip()
 FORCE_RENEW = os.environ.get("FORCE_RENEW", "false").lower() == "true"
 HEADLESS = os.environ.get("HEADLESS", "false").lower() == "true"
 
@@ -124,20 +128,24 @@ def normalize_socks5_proxy(proxy_value: str) -> str:
     return proxy_value
 
 
-def wait_http_proxy_ready(port: int, timeout: int = 15):
-    proxies = {"http": f"http://127.0.0.1:{port}", "https": f"http://127.0.0.1:{port}"}
+def check_http_proxy_url(proxy_url: str, timeout: int = 15):
+    proxies = {"http": proxy_url, "https": proxy_url}
     last_error = None
     start = time.time()
     while time.time() - start < timeout:
         try:
             resp = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=8)
             if resp.ok:
-                print("本地 HTTP 代理连通性测试成功", flush=True)
+                print(f"HTTP 代理连通性测试成功: {proxy_url}", flush=True)
                 return
         except Exception as e:
             last_error = e
         time.sleep(1)
-    raise RuntimeError(f"本地代理就绪检测失败: {last_error}")
+    raise RuntimeError(f"代理就绪检测失败({proxy_url}): {last_error}")
+
+
+def wait_http_proxy_ready(port: int, timeout: int = 15):
+    check_http_proxy_url(f"http://127.0.0.1:{port}", timeout)
 
 
 def start_gost(socks_proxy: str) -> subprocess.Popen:
@@ -410,12 +418,12 @@ def find_button(driver, xpaths, timeout=20):
     return None
 
 
-def perform_browser_renew(cookies_dict, proxy_ready, old_exp_str):
+def perform_browser_renew(cookies_dict, proxy_ready, old_exp_str, proxy_url=None):
     """返回 (ok, msg, new_exp_str|None)。ok=True 仅当验证到期日确实延后。"""
     from seleniumbase import Driver
 
     print("启动浏览器进行续期...", flush=True)
-    proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}" if proxy_ready else None
+    proxy = proxy_url if proxy_ready else None
     if proxy:
         print(f"浏览器走代理: {proxy}", flush=True)
     else:
@@ -523,14 +531,23 @@ def main():
     proxy_ready = False
     gost_proc = None
     proxies = None
+    active_proxy_url = None
 
-    if SOCKS5_PROXY:
+    if HTTP_PROXY_URL:
+        # xray 等已直接提供 HTTP 代理, 跳过 gost 中转
+        try:
+            check_http_proxy_url(HTTP_PROXY_URL)
+            proxies = {"http": HTTP_PROXY_URL, "https": HTTP_PROXY_URL}
+            active_proxy_url = HTTP_PROXY_URL
+            proxy_ready = True
+            print("HTTP 代理已挂载生效 (请求 + 浏览器都会走代理)。", flush=True)
+        except Exception as e:
+            print(f"HTTP 代理检测失败: {e}, 请求与浏览器都将采用直连。", flush=True)
+    elif SOCKS5_PROXY:
         try:
             gost_proc = start_gost(SOCKS5_PROXY)
-            proxies = {
-                "http": f"http://127.0.0.1:{LOCAL_HTTP_PORT}",
-                "https": f"http://127.0.0.1:{LOCAL_HTTP_PORT}",
-            }
+            active_proxy_url = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
+            proxies = {"http": active_proxy_url, "https": active_proxy_url}
             proxy_ready = True
             print("代理已挂载生效 (请求 + 浏览器都会走代理)。", flush=True)
         except Exception as e:
@@ -580,7 +597,7 @@ def main():
                 info["name"], info["status"], info["exp"], days_left, info["ip"], result_tag)
         else:
             print(f"剩余 {days_left} 天, 触发续期流程...", flush=True)
-            ok, msg, new_exp = perform_browser_renew(cookies_dict, proxy_ready, info["exp"])
+            ok, msg, new_exp = perform_browser_renew(cookies_dict, proxy_ready, info["exp"], active_proxy_url)
             if ok:
                 new_days = parse_days_remaining(new_exp)
                 result_tag = f"续期成功, 到期延至 {new_exp} (剩 {new_days} 天)"
