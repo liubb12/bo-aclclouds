@@ -46,9 +46,21 @@ jobs:
           sleep 4
           echo "--- sing-box 启动日志 ---"
           cat /tmp/singbox.log
-          echo "--- 代理自检 (verbose) ---"
-          curl -s --max-time 15 -x socks5h://127.0.0.1:11808 https://httpbin.org/ip && echo "proxy socks OK"
-          curl -s --max-time 15 -x http://127.0.0.1:18080 https://httpbin.org/ip && echo "proxy http OK"
+          echo "--- 代理自检: 直连对照 ---"
+          DIRECT_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://dash.eknodes.es/servers) || DIRECT_CODE="000"
+          echo "直连 HTTP_CODE=$DIRECT_CODE (预期 429=被 Vercel 拦截, 对照用)"
+          echo "--- 代理自检: 经代理访问真实目标 ---"
+          PROXY_CODE=$(curl -s -o /tmp/probe.html -w "%{http_code}" --max-time 25 -x http://127.0.0.1:18080 https://dash.eknodes.es/servers) || PROXY_CODE="000"
+          echo "代理 HTTP_CODE=$PROXY_CODE"
+          echo "页面标题: $(grep -o '<title>[^<]*</title>' /tmp/probe.html 2>/dev/null | head -1)"
+          if [ "$PROXY_CODE" = "000" ]; then
+            echo "--- 失败诊断 (-v, 只看握手阶段) ---"
+            curl -v --max-time 15 -x http://127.0.0.1:18080 https://dash.eknodes.es/servers -o /dev/null 2>&1 | grep -E "^(<|>|\*)" | tail -30 || true
+            echo "--- sing-box 完整日志 ---"
+            cat /tmp/singbox.log
+            echo "代理链路未建立，停止"
+            exit 1
+          fi
 
       - name: Install Python Dependencies
         run: |
