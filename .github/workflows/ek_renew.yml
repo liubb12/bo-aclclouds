@@ -42,9 +42,16 @@ jobs:
           XRAY_CONFIG: ${{ secrets.EK_XRAY_CONFIG }}
         run: |
           echo "$XRAY_CONFIG" > /tmp/xray_config.json
+          echo "--- JSON 校验 ---"
+          python3 -c "import json; json.load(open('/tmp/xray_config.json')); print('JSON OK')"
+          echo "--- xray 配置测试 ---"
+          /usr/local/bin/xray -test -c /tmp/xray_config.json
           nohup xray run -c /tmp/xray_config.json > /tmp/xray.log 2>&1 &
-          sleep 3
-          curl -s --max-time 10 -x socks5h://127.0.0.1:11808 https://httpbin.org/ip && echo "xray ready"
+          sleep 4
+          echo "--- xray 启动日志 ---"
+          cat /tmp/xray.log
+          echo "--- 代理自检 (verbose) ---"
+          curl -v --max-time 15 -x socks5h://127.0.0.1:11808 https://httpbin.org/ip || true
 
       - name: Install Python Dependencies
         run: |
