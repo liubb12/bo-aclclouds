@@ -1,9 +1,9 @@
 name: EKNodes Auto Renew
 
 on:
-  workflow_dispatch:          # 支持在 GitHub Actions 网页端手动点击触发
+  workflow_dispatch:
   repository_dispatch:
-    types: [ek_renew]         # 接收青龙面板、外部脚本或 VPS 发送的自动化唤醒事件
+    types: [ek_renew]
 
 jobs:
   renew:
@@ -23,6 +23,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb
 
+      - name: Install gost (Proxy)
+        run: |
+          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+          gzip -d gost-linux-amd64-2.11.5.gz
+          chmod +x gost-linux-amd64-2.11.5
+          sudo mv gost-linux-amd64-2.11.5 /usr/local/bin/gost
+
+      - name: Install xray (VMess/HY2 -> SOCKS5)
+        run: |
+          XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+          wget -q "$XRAY_URL" -O /tmp/xray.zip
+          unzip -o /tmp/xray.zip xray -d /usr/local/bin/
+          chmod +x /usr/local/bin/xray
+
+      - name: Start xray (dedicated proxy)
+        env:
+          XRAY_CONFIG: ${{ secrets.EK_XRAY_CONFIG }}
+        run: |
+          echo "$XRAY_CONFIG" > /tmp/xray_config.json
+          nohup xray run -c /tmp/xray_config.json > /tmp/xray.log 2>&1 &
+          sleep 3
+          curl -s --max-time 10 -x socks5h://127.0.0.1:11808 https://httpbin.org/ip && echo "xray ready"
+
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
@@ -31,6 +54,7 @@ jobs:
       - name: Run EKNodes Renew Script
         env:
           EK_COOKIE: ${{ secrets.EK_COOKIE }}
+          SOCKS5_PROXY: 127.0.0.1:11808
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
