@@ -56,7 +56,7 @@ jobs:
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
-          pip install requests pillow seleniumbase
+          pip install requests pillow seleniumbase curl_cffi
 
       - name: Run EKNodes Renew Script
         env:
