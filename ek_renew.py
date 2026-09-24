@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动巡检与智能续期引擎 (修复版 v2.5)
+# EKNodes 自动巡检与智能续期引擎 (修复版 v2.6)
 # ------------------------------------------------------------
 # 相对 v1 的修复:
 #  1. 代理状态统一用 proxy_ready 标志: gost 启动失败时,
@@ -32,6 +32,10 @@
 # 14. 复用已过验证的浏览器 (参考 SkyMC 脚本的单会话思路):
 #     验证页闯过后不关闭浏览器, 续期直接复用同一 driver,
 #     避免二次闯验证 (Vercel 通行 cookie 已在该会话中)
+# --- v2.6 ---
+# 15. BROWSER_FIRST=1: 跳过 requests 预检, 真浏览器第一个访问。
+#     requests 预检的 bot 特征可能先把 IP/会话标记, 导致后续浏览器也被连带拦截。
+#     实验性开关, 默认关闭。
 # ------------------------------------------------------------
 # GitHub Actions 运行要求:
 #  - 安装 gost (仅当使用 SOCKS5_PROXY 时)
@@ -644,11 +648,15 @@ def main():
 
     try:
         print("正在获取服务器列表...", flush=True)
-        try:
-            html_text = fetch_server_page(session)
-        except CheckpointBlockedError as cbe:
-            print(f"{cbe}, 改用真浏览器抓取...", flush=True)
+        if os.environ.get("BROWSER_FIRST") == "1":
+            print("BROWSER_FIRST=1: 跳过 requests 预检, 直接用真浏览器抓取 (避免预检的 bot 特征污染会话)", flush=True)
             html_text, browser_driver = fetch_server_page_via_browser(cookies_dict, proxy_ready, active_proxy_url)
+        else:
+            try:
+                html_text = fetch_server_page(session)
+            except CheckpointBlockedError as cbe:
+                print(f"{cbe}, 改用真浏览器抓取...", flush=True)
+                html_text, browser_driver = fetch_server_page_via_browser(cookies_dict, proxy_ready, active_proxy_url)
         info = parse_server_page(html_text)
 
         days_left = parse_days_remaining(info["exp"])
