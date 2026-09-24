@@ -23,30 +23,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb
 
-      - name: Install xray (VMess/HY2 -> SOCKS5)
+      - name: Install sing-box (HY2 -> SOCKS5/HTTP)
         run: |
-          XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
-          wget -q "$XRAY_URL" -O /tmp/xray.zip
-          unzip -o /tmp/xray.zip xray -d /usr/local/bin/
-          chmod +x /usr/local/bin/xray
+          SB_VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+          echo "sing-box version: $SB_VER"
+          curl -sL "https://github.com/SagerNet/sing-box/releases/download/${SB_VER}/sing-box-${SB_VER#v}-linux-amd64.tar.gz" -o /tmp/sb.tgz
+          tar xzf /tmp/sb.tgz -C /tmp
+          sudo install -m 0755 /tmp/sing-box-*/sing-box /usr/local/bin/sing-box
+          sing-box version
 
-      - name: Start xray (dedicated proxy)
+      - name: Start sing-box (dedicated proxy)
         env:
           XRAY_CONFIG: ${{ secrets.EK_XRAY_CONFIG }}
           QUIC_GO_DISABLE_GSO: "1"
         run: |
-          echo "$XRAY_CONFIG" > /tmp/xray_config.json
+          echo "$XRAY_CONFIG" > /tmp/sb_config.json
           echo "--- JSON 校验 ---"
-          python3 -c "import json; json.load(open('/tmp/xray_config.json')); print('JSON OK')"
-          echo "--- xray 配置测试 ---"
-          /usr/local/bin/xray -test -c /tmp/xray_config.json
-          nohup xray run -c /tmp/xray_config.json > /tmp/xray.log 2>&1 &
+          python3 -c "import json; json.load(open('/tmp/sb_config.json')); print('JSON OK')"
+          echo "--- sing-box 配置测试 ---"
+          /usr/local/bin/sing-box check -c /tmp/sb_config.json
+          nohup sing-box run -c /tmp/sb_config.json > /tmp/singbox.log 2>&1 &
           sleep 4
-          echo "--- xray 启动日志 ---"
-          cat /tmp/xray.log
+          echo "--- sing-box 启动日志 ---"
+          cat /tmp/singbox.log
           echo "--- 代理自检 (verbose) ---"
-          curl -s --max-time 10 -x socks5h://127.0.0.1:11808 https://httpbin.org/ip && echo "xray socks OK"
-          curl -s --max-time 10 -x http://127.0.0.1:18080 https://httpbin.org/ip && echo "xray http OK"
+          curl -s --max-time 15 -x socks5h://127.0.0.1:11808 https://httpbin.org/ip && echo "proxy socks OK"
+          curl -s --max-time 15 -x http://127.0.0.1:18080 https://httpbin.org/ip && echo "proxy http OK"
 
       - name: Install Python Dependencies
         run: |
