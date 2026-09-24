@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# EKNodes 自动巡检与智能续期引擎 (修复版 v2)
+# EKNodes 自动巡检与智能续期引擎 (修复版 v2.4)
 # ------------------------------------------------------------
 # 相对 v1 的修复:
 #  1. 代理状态统一用 proxy_ready 标志: gost 启动失败时,
@@ -24,6 +24,10 @@
 # --- v2.3 ---
 # 12. 新增 HTTP_PROXY_URL: xray 等已直接提供 HTTP 代理时跳过 gost 中转
 #     (gost 2.11 太老, 多一层中转就多一个故障点); 浏览器改传真实代理地址
+# --- v2.4 ---
+# 13. Vercel 验证页浏览器闯关: curl 请求命中 "Vercel Security Checkpoint"
+#     时不再空等重试(机房 IP 等多久都解不开), 直接起真浏览器执行 JS 挑战,
+#     闯过后抓取页面源码继续原流程; 闯不过才按失败告警
 # ------------------------------------------------------------
 # GitHub Actions 运行要求:
 #  - 安装 gost (仅当使用 SOCKS5_PROXY 时)
@@ -82,6 +86,10 @@ class ParseError(EKError):
 
 class NotLoggedInError(EKError):
     pass
+
+
+class CheckpointBlockedError(EKError):
+    """命中 Vercel 验证页, 可尝试用真浏览器闯过去。"""
 
 
 # ---------------- Telegram ----------------
@@ -257,7 +265,8 @@ def parse_server_page(html_text: str) -> dict:
 
 
 def fetch_server_page(session) -> str:
-    """带登录态校验 + 429/5xx 自动重试的页面抓取。"""
+    """带登录态校验 + 429/5xx 自动重试的页面抓取。
+    命中 Vercel 验证页时直接抛 CheckpointBlockedError (机房 IP 空等重试没用)。"""
     resp = None
     for attempt in range(len(RETRY_WAITS) + 1):
         try:
@@ -265,6 +274,11 @@ def fetch_server_page(session) -> str:
         except Exception as e:
             raise EKError(f"请求服务器列表失败: {e}")
         print(f"HTTP {resp.status_code} | 最终地址: {resp.url} | 长度: {len(resp.text)}", flush=True)
+        body = resp.text or ""
+        if any(m in body for m in WAF_MARKERS):
+            snippet = body[:300].replace("\n", " ")
+            print(f"命中 Vercel 验证页, 跳过重试改用浏览器闯验证。片段: {snippet}", flush=True)
+            raise CheckpointBlockedError("请求被 Vercel 验证页拦截")
         if resp.status_code in RETRYABLE_STATUSES and attempt < len(RETRY_WAITS):
             wait = RETRY_WAITS[attempt]
             print(f"命中 HTTP {resp.status_code}, {wait} 秒后重试 ({attempt + 1}/{len(RETRY_WAITS)})...",
@@ -288,11 +302,6 @@ def fetch_server_page(session) -> str:
         )
     if resp.status_code != 200:
         raise EKError(f"服务器列表返回 HTTP {resp.status_code}")
-    for marker in WAF_MARKERS:
-        if marker in resp.text:
-            raise NotLoggedInError(
-                f"命中 WAF 拦截({marker}), EK_COOKIE 可能失效或出口 IP 被拦截, 请更新 Secrets"
-            )
     return resp.text
 
 
@@ -517,11 +526,48 @@ def perform_browser_renew(cookies_dict, proxy_ready, old_exp_str, proxy_url=None
         driver.quit()
 
 
+def fetch_server_page_via_browser(cookies_dict, proxy_ready, proxy_url=None) -> str:
+    """真浏览器闯 Vercel 验证页并抓取服务器列表, 返回页面 HTML。
+    Vercel 验证页是 JS 挑战, curl 解不开但真浏览器有机会自动解开。"""
+    from seleniumbase import Driver
+
+    print("启动真浏览器闯 Vercel 验证页...", flush=True)
+    proxy = proxy_url if proxy_ready else None
+    print(f"浏览器走{'代理: ' + proxy if proxy else '直连'}", flush=True)
+    driver = Driver(uc=True, headless=HEADLESS, proxy=proxy, uc_subprocess=True)
+    try:
+        driver.uc_open_with_reconnect(BASE_URL, reconnect_time=4)
+        time.sleep(2)
+        inject_cookies(driver, cookies_dict)
+        print(f"打开服务器列表页: {SERVERS_URL} ...", flush=True)
+        driver.uc_open_with_reconnect(SERVERS_URL, reconnect_time=6)
+
+        # 等 JS 挑战自动解开 (通常 5~30 秒, 最多等约 150 秒)
+        if not shield_clear(driver, rounds=30):
+            try:
+                driver.save_screenshot("real_browser_error.png")
+            except Exception:
+                pass
+            raise EKError("真浏览器 150 秒内未能通过 Vercel 验证页 (已截图)")
+
+        time.sleep(3)  # 挑战解开后等页面真正加载
+        src = driver.page_source
+        if "login" in driver.current_url.lower():
+            raise NotLoggedInError("浏览器被重定向到登录页, EK_COOKIE 可能已失效, 请更新 Secrets")
+        print(f"验证页已通过, 页面长度: {len(src)}", flush=True)
+        return src
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
 # ---------------- 主流程 ----------------
 
 def main():
     print("=" * 45, flush=True)
-    print(" EKNodes 自动巡检与续期调度 (修复版 v2)", flush=True)
+    print(" EKNodes 自动巡检与续期调度 (修复版 v2.4)", flush=True)
     print("=" * 45, flush=True)
 
     if not EK_COOKIE:
@@ -580,7 +626,11 @@ def main():
 
     try:
         print("正在获取服务器列表...", flush=True)
-        html_text = fetch_server_page(session)
+        try:
+            html_text = fetch_server_page(session)
+        except CheckpointBlockedError as cbe:
+            print(f"{cbe}, 改用真浏览器抓取...", flush=True)
+            html_text = fetch_server_page_via_browser(cookies_dict, proxy_ready, active_proxy_url)
         info = parse_server_page(html_text)
 
         days_left = parse_days_remaining(info["exp"])
