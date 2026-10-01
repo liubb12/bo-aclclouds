@@ -1,0 +1,62 @@
+name: ACLClouds Auto Renew
+
+on:
+  schedule:
+    # UTC 23:43 = 北京时间 07:43，每天 1 次（避开高峰）
+    - cron: "43 23 * * *"
+  workflow_dispatch: # 支持手动点 "Run workflow" 测试
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Install Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable xvfb
+
+      - name: Install gost (仅当配置了 SOCKS5_PROXY)
+        if: env.SOCKS5_PROXY != ''
+        run: |
+          curl -L https://github.com/go-gost/gost/releases/download/v2.11.5/gost_2.11.5_linux_amd64.tar.gz -o gost.tar.gz
+          tar xzf gost.tar.gz gost
+          sudo mv gost /usr/local/bin/gost
+          gost -V
+
+      - name: Run renew (Xvfb 虚拟显示器)
+        env:
+          ACL_USERNAME: ${{ secrets.ACL_USERNAME }}
+          ACL_PASSWORD: ${{ secrets.ACL_PASSWORD }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
+        run: |
+          sudo Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          export DISPLAY=:99
+          python aclclouds_renew.py
+
+      - name: Upload screenshots (失败时排查用)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aclclouds-screenshots
+          path: "*.png"
+          if-no-files-found: ignore
+          retention-days: 7
