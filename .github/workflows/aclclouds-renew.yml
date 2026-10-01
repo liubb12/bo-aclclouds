@@ -43,8 +43,17 @@ jobs:
       - name: Install gost (仅当配置了 SOCKS5_PROXY)
         if: env.SOCKS5_PROXY != ''
         run: |
-          curl -L https://github.com/go-gost/gost/releases/download/v2.11.5/gost_2.11.5_linux_amd64.tar.gz -o gost.tar.gz
-          tar xzf gost.tar.gz gost
+          # gost v2 二进制在旧仓库 ginuerzh/gost, 是 gzip 单文件(不是 tar.gz)
+          curl -fL --retry 3 \
+            https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz \
+            -o gost.gz
+          file gost.gz
+          gunzip -f gost.gz
+          chmod +x gost
+          # 确认是 Linux 可执行文件而不是错误页面
+          if ! file gost | grep -q ELF; then
+            echo "❌ gost 下载内容不是可执行文件"; cat gost | head -20; exit 1
+          fi
           sudo mv gost /usr/local/bin/gost
           gost -V
 
