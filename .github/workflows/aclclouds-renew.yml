@@ -2,8 +2,9 @@ name: ACLClouds Auto Renew
 
 on:
   schedule:
-    # UTC 23:43 = 北京时间 07:43，每天 1 次（避开高峰）
-    - cron: "43 23 * * *"
+    # 北京时间 07:43 / 15:43 / 23:43 各一次
+    # 续期窗口为到期前 48 小时, 一天 3 次 => 窗口内有约 6 次机会, 不怕单次失败
+    - cron: "43 23,7,15 * * *"
   workflow_dispatch: # 支持手动点 "Run workflow" 测试
 
 jobs:
