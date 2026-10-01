@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动登录与服务器续期脚本 (弹窗复选框与提交完整版)
+# ACLClouds 自动登录与服务器续期脚本 (完整修正版)
 # ============================================================
 import os
 import re
@@ -59,7 +59,7 @@ def tg_send(text: str, photo_path: str = None):
         if resp.status_code == 200:
             print("  ✅ TG 通知发送成功")
         else:
-            print(f"  ⚠️ TG 通知发送失败: {resp.text}")
+            print(f"  ⚠️️ TG 通知发送失败: {resp.text}")
     except Exception as e:
         print(f"  ⚠️ TG 通知异常: {e}")
 
@@ -138,21 +138,29 @@ def get_expire_info(driver) -> str:
 
 
 def set_input_value(driver, element, value):
+    """适配单页应用 (React/Vue/Svelte) 原型链 Setter + 完整事件触发"""
     try:
-        element.click()
-        time.sleep(0.2)
-        element.send_keys(Keys.CONTROL, "a")
-        element.send_keys(Keys.BACKSPACE)
-        for ch in value:
-            element.send_keys(ch)
-            time.sleep(0.02)
         driver.execute_script("""
             const el = arguments[0];
+            const val = arguments[1];
+            el.focus();
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+            nativeInputValueSetter.call(el, val);
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
-        """, element)
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+        """, element, value)
     except Exception:
-        pass
+        try:
+            element.click()
+            time.sleep(0.2)
+            element.send_keys(Keys.CONTROL, "a")
+            element.send_keys(Keys.BACKSPACE)
+            for ch in value:
+                element.send_keys(ch)
+                time.sleep(0.02)
+        except Exception:
+            pass
 
 
 def ocr_recognize_image(image_bytes: bytes) -> str:
@@ -168,16 +176,18 @@ def ocr_recognize_image(image_bytes: bytes) -> str:
 
 
 def solve_acl_custom_captcha(driver, context_name="登录页"):
-    print(f"  🛡️ 正在处理 [{context_name}] 的 'I am not a robot' 验证码...", flush=True)
+    print(f"  🛡️ 正在处理 [{context_name}] 的验证码...", flush=True)
 
-    # 1. 优先定位弹窗或页面中的复选框元素
+    # 1. 优先定位弹窗或页面中的复选框/验证框
     target_box = None
     try:
         selectors = [
             "div[role='dialog'] input[type='checkbox']",
             ".modal input[type='checkbox']",
             "div[role='dialog'] span",
-            "input[type='checkbox']"
+            "input[type='checkbox']",
+            ".altcha-checkbox",
+            "canvas"
         ]
         for sel in selectors:
             elems = driver.find_elements(By.CSS_SELECTOR, sel)
@@ -190,54 +200,40 @@ def solve_acl_custom_captcha(driver, context_name="登录页"):
     except Exception:
         pass
 
-    # 2. 真实物理点击复选框
-    clicked = False
+    # 2. 点击复选框/验证框
     if target_box:
         try:
             ActionChains(driver).move_to_element(target_box).pause(0.2).click().perform()
-            clicked = True
             print(f"  👉 [{context_name}] ActionChains 物理点击复选框成功", flush=True)
         except Exception:
-            pass
-
-    if not clicked:
-        clicked = driver.execute_script("""
-            const modal = document.querySelector('div[role="dialog"], .modal') || document.body;
-            const candidates = Array.from(modal.querySelectorAll('*')).filter(el => {
-                const txt = (el.innerText || el.textContent || '').trim();
-                return txt.includes('not a robot') && el.children.length <= 4 && el.clientHeight < 120;
-            });
-            if (candidates.length === 0) return false;
-            const container = candidates[0];
-            const clickable = container.querySelector('input, span, div, svg') || container;
-            clickable.scrollIntoView({ block: 'center' });
-            ['mouseover', 'mouseenter', 'mousedown', 'mouseup', 'click'].forEach(evtType => {
-                clickable.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
-            });
-            return true;
-        """)
-        if clicked:
-            print(f"  👉 [{context_name}] JS 派发事件点击复选框", flush=True)
+            try:
+                driver.execute_script("arguments[0].click();", target_box)
+                print(f"  👉 [{context_name}] JS 点击复选框成功", flush=True)
+            except Exception:
+                pass
 
     time.sleep(2)
 
-    # 3. 轮询等待点选题出现或直接 Verified（最长等待 10 秒）
-    target_element = None
-    for _ in range(10):
+    # 3. 轮询检测是否验证成功（完美包含 You're human 与 Verified 状态）
+    for _ in range(12):
+        body_text = driver.get_text("body")
+        if any(k in body_text for k in ["You're human", "Verified", "Human verified"]):
+            print(f"  🟢 [{context_name}] 验证成功，已检测到 Verified / You're human 状态！", flush=True)
+            time.sleep(2)  # 给前端留出时间将算力 Token 挂载入隐藏表单
+            return True
+
+        prompts = driver.find_elements(By.XPATH, "//*[contains(text(), 'Click on') or contains(text(), 'click on')]")
+        visible_prompts = [p for p in prompts if p.is_displayed()]
+        if visible_prompts:
+            break
+        time.sleep(1)
+
+    # 4. 若出现点选题（备用方案），执行 OCR 识别与点击
+    try:
         prompts = driver.find_elements(By.XPATH, "//*[contains(text(), 'Click on') or contains(text(), 'click on')]")
         visible_prompts = [p for p in prompts if p.is_displayed()]
         if visible_prompts:
             target_element = visible_prompts[0]
-            break
-        body_text = driver.get_text("body")
-        if "Verified" in body_text:
-            print(f"  🟢 [{context_name}] 验证码直接变为 Verified 状态！", flush=True)
-            return True
-        time.sleep(1)
-
-    # 4. 如果有点选题，执行 OCR 识别与点击
-    if target_element:
-        try:
             prompt_text = target_element.text.strip()
             print(f"  🧩 [{context_name}] 发现点选题: {prompt_text}", flush=True)
             match = re.search(r'[Cc]lick on\s+([A-Za-z0-9_-]+)', prompt_text)
@@ -286,13 +282,14 @@ def solve_acl_custom_captcha(driver, context_name="登录页"):
                         driver.execute_script("arguments[0].click();", best_card)
                     print(f"  ✅ 已精准点击目标卡片: {best_text}", flush=True)
                     time.sleep(2)
-        except Exception as e:
-            print(f"  ℹ️ 点选题处理异常: {e}")
+    except Exception as e:
+        print(f"  ℹ️ 点选题处理异常: {e}")
 
     for _ in range(8):
         body_text = driver.get_text("body")
-        if "Verified" in body_text:
-            print(f"  🟢 [{context_name}] 验证成功，已显示 Verified！", flush=True)
+        if any(k in body_text for k in ["You're human", "Verified", "Human verified"]):
+            print(f"  🟢 [{context_name}] 验证成功！", flush=True)
+            time.sleep(2)
             return True
         time.sleep(1)
     return False
@@ -318,7 +315,7 @@ def main():
     driver = Driver(uc=True, headless=False, proxy=uc_proxy)
 
     try:
-        # 1. 登录
+        # 1. 打开登录页
         print(f"🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
         driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
         time.sleep(4)
@@ -329,25 +326,27 @@ def main():
         user_elem = driver.find_element(By.CSS_SELECTOR, user_selector)
         set_input_value(driver, user_elem, ACL_USERNAME)
         print(f"  📝 已填入账号: {ACL_USERNAME[:3]}***", flush=True)
-        time.sleep(1)
+        time.sleep(0.5)
 
         pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
         set_input_value(driver, pwd_elem, ACL_PASSWORD)
         print("  📝 已填入密码", flush=True)
         time.sleep(1)
 
+        # 解决验证码并等待 Token 写入表单
         solve_acl_custom_captcha(driver, context_name="登录页")
         time.sleep(2)
 
         print("🔑 正在点击 [Sign in] 按钮提交登录...", flush=True)
         submit_btn = driver.find_element(By.XPATH, "//button[contains(., 'Sign in') or contains(., 'Login') or contains(., 'Connexion') or @type='submit']")
         try:
-            submit_btn.click()
+            ActionChains(driver).move_to_element(submit_btn).pause(0.3).click().perform()
         except Exception:
             driver.execute_script("arguments[0].click();", submit_btn)
 
+        # 轮询验证跳转状态
         for _ in range(15):
-            if "/auth/login" not in driver.current_url:
+            if "/auth/login" not in driver.current_url or "server" in driver.current_url:
                 break
             time.sleep(1)
 
