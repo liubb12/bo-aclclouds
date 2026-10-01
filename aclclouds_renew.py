@@ -503,7 +503,11 @@ def main():
         now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
         if not renew_elements:
-            print("ℹ️ 当前未发现 Renew 按钮（续期开放于到期前 2 天内）", flush=True)
+            # 每轮都发巡检通知, 方便用户确认任务在跑/排查哪一步出问题
+            print(
+                f"ℹ️ 当前未发现 Renew 按钮（{expire_before}，到期前 2 天内才开放）",
+                flush=True,
+            )
             driver.save_screenshot("dashboard_status.png")
             tg_send(
                 f"ℹ️ <b>ACLClouds 状态巡检</b>\n\n"
