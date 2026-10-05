@@ -27,12 +27,18 @@ import urllib.request
 import urllib.error
 import urllib.parse
 
-PANEL = os.environ.get('HS_PANEL_URL', 'https://panel.host-ship.com').rstrip('/')
-API_KEY = os.environ.get('HS_API_KEY', '').strip()
-SERVER_ID = os.environ.get('HS_SERVER_ID', 'c12fd5d9').strip()
-RENEW_THRESHOLD = int(os.environ.get('RENEW_THRESHOLD', '4'))
-TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN', '').strip()
-TG_CHAT_ID = os.environ.get('TG_CHAT_ID', '').strip()
+def env(key, default=''):
+    """读环境变量, 空字符串视为未设置 (GitHub Actions 未配置时渲染为空串)"""
+    val = os.environ.get(key, '').strip()
+    return val if val else default
+
+
+PANEL = env('HS_PANEL_URL', 'https://panel.host-ship.com').rstrip('/')
+API_KEY = env('HS_API_KEY')
+SERVER_ID = env('HS_SERVER_ID', 'c12fd5d9')
+RENEW_THRESHOLD = int(env('RENEW_THRESHOLD', '4'))
+TG_BOT_TOKEN = env('TG_BOT_TOKEN')
+TG_CHAT_ID = env('TG_CHAT_ID')
 
 UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36')
