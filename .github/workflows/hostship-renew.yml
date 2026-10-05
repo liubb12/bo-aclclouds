@@ -1,0 +1,32 @@
+name: HostShip Auto Renew
+
+on:
+  schedule:
+    # 每天 2 次: 北京 07:43 / 19:43 (UTC 23:43 / 11:43)
+    - cron: '43 23,11 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run renewal (pure stdlib, no deps)
+        env:
+          HS_API_KEY: ${{ secrets.HS_API_KEY }}
+          HS_SERVER_ID: ${{ vars.HS_SERVER_ID }}
+          HS_PANEL_URL: ${{ vars.HS_PANEL_URL }}
+          RENEW_THRESHOLD: ${{ vars.RENEW_THRESHOLD }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python "$(find . -name hostship_renew.py -print -quit)"
