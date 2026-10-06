@@ -324,6 +324,53 @@ def page_has_email(driver):
         return False
 
 
+# ------------------------------------------------------------
+# 反指纹补丁 (过 Vercel checkpoint v2 关键)
+# ------------------------------------------------------------
+# Xvfb 无真实 GPU, WebGL 渲染器是 "Google SwiftShader" —— 机房浏览器铁证。
+# 用 CDP 在每个新文档执行任何页面脚本前注入补丁, 伪装成普通 Intel 核显桌面。
+STEALTH_JS = r"""
+(() => {
+  const VENDOR = "Google Inc. (Intel)";
+  const RENDERER =
+    "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)";
+  const patchGL = (proto) => {
+    if (!proto) return;
+    const orig = proto.getParameter;
+    proto.getParameter = function (p) {
+      if (p === 37445) return VENDOR;    // UNMASKED_VENDOR_WEBGL
+      if (p === 37446) return RENDERER;  // UNMASKED_RENDERER_WEBGL
+      return orig.call(this, p);
+    };
+  };
+  patchGL(window.WebGLRenderingContext &&
+          window.WebGLRenderingContext.prototype);
+  patchGL(window.WebGL2RenderingContext &&
+          window.WebGL2RenderingContext.prototype);
+  // 机房容器短板: CPU/内存参数
+  try {
+    Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 8 });
+  } catch (e) {}
+  try {
+    Object.defineProperty(navigator, "deviceMemory", { get: () => 8 });
+  } catch (e) {}
+  // headful 真 Chrome 必有 window.chrome
+  if (!window.chrome) {
+    window.chrome = { runtime: {}, app: {}, csi: () => {}, loadTimes: () => {} };
+  }
+})();
+"""
+
+
+def stealth_inject(driver):
+    """CDP 注入反指纹补丁; 重复注入无害 (补丁幂等)"""
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument", {"source": STEALTH_JS})
+    except Exception:
+        pass
+
+
 def open_with_disconnect(driver, url, reconnect_time=10):
     """
     用 uc_open_with_reconnect 打开页面:
@@ -337,6 +384,8 @@ def open_with_disconnect(driver, url, reconnect_time=10):
     except Exception as e:
         log(f"  ℹ️ uc_open_with_reconnect 不可用({str(e)[:80]}), 回退普通打开")
         driver.get(url)
+    # CDP 断开重连后, 之前会话注入的新文档脚本可能已失效, 重新注入
+    stealth_inject(driver)
 
 
 def do_login(driver):
@@ -711,8 +760,16 @@ def main():
         tg_send("🔴 <b>eknodes 续期失败</b>\n\n未配置 EK_EMAIL / EK_PASSWORD")
         return
 
+    # WebRTC 防泄漏是过 Vercel 的关键:
+    # 不设这两个开关, WebRTC 会绕过代理直连, 把 Actions 机房真实 IP
+    # 暴露给 Vercel 质询脚本 (本地住宅宽带泄漏的是住宅 IP, 所以本地随便过)
+    webrtc_args = ("--force-webrtc-ip-handling-policy=disable_non_proxied_udp,"
+                   "--enforce-webrtc-ip-permission-check")
     driver = Driver(uc=True, headless=False,
-                    proxy=PROXY_SERVER or None, ad_block=False)
+                    proxy=PROXY_SERVER or None, ad_block=False,
+                    chromium_arg=webrtc_args)
+    # 在打开任何页面前注入反指纹补丁, 保证首个文档就生效
+    stealth_inject(driver)
     summary = {"renewed": [], "limited": [], "failed": [], "skipped": []}
 
     try:
