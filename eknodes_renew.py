@@ -339,9 +339,17 @@ def do_login(driver):
                 continue
             if page_has_email(driver):
                 return True
-            # 质询已跑完但浏览器被拒: 重新加载页面重跑质询
+            # 质询已跑完但浏览器被拒: 清 cookie 后重开页面
+            # Vercel checkpoint v2 会在 cookie 里记录失败标记,
+            # 不清缓存同一 session 内永远被拒
             if vercel_failed(driver):
-                log("  🛡️ Vercel 校验被拒 (Failed to verify)，刷新重跑质询...")
+                log("  🛡️ Vercel 校验被拒 (Failed to verify)，清缓存重跑质询...")
+                try:
+                    driver.delete_all_cookies()
+                    driver.execute_script("try{localStorage.clear();}catch(e){}")
+                    driver.execute_script("try{sessionStorage.clear();}catch(e){}")
+                except Exception:
+                    pass
                 driver.get(LOGIN_URL)
                 time.sleep(6)
                 continue
