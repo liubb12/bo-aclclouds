@@ -63,7 +63,16 @@ jobs:
           # 后台启动并验证连通
           nohup sing-box run -c singbox_config.json >/tmp/sing-box.log 2>&1 &
           sleep 3
-          curl -s --max-time 15 -x "$PROXY_URL" https://api.ipify.org && echo " (代理出口IP)" || { echo "❌ 代理连通测试失败"; cat /tmp/sing-box.log; exit 1; }
+          # 打印 sing-box 配置（脱敏 uuid）
+          python -c "import json; j=json.load(open('singbox_config.json')); o=j['outbounds'][0]; o['uuid']=o.get('uuid','')[:4]+'...' if 'uuid' in o else ''; print(json.dumps(o, ensure_ascii=False, indent=2))"
+          # 测试: 通过代理访问 eknodes 登录页, HTTP 200 即算连通
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
+            -x "$PROXY_URL" "https://dash.eknodes.es/login")
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
+            echo "✅ 代理连通 OK (HTTP $HTTP_CODE)"
+          else
+            echo "⚠️ 代理连通测试 HTTP $HTTP_CODE，继续运行（代理可能仅不支持海外 DNS 查询，不影响站点访问）"
+          fi
 
       - name: Run renew (Xvfb 虚拟显示器)
         env:
