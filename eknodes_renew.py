@@ -696,8 +696,9 @@ def main():
         if not do_login(driver):
             shot(driver, "ek_login_failed.png")
             hint = ("\n\n检测到 Vercel 浏览器校验被拒，GitHub 机房 IP 信誉低，"
-                    "建议在仓库 Secret 配置 <code>PROXY_SERVER</code>"
-                    "（http/socks5 无账密代理）后重试。") if not PROXY_SERVER \
+                    "建议在仓库 Secret 配置 <code>NODE_LINK</code>"
+                    "（vmess:// 或 vless:// 住宅节点）或 <code>PROXY_SERVER</code>"
+                    "（http/socks5 代理）后重试。") if not PROXY_SERVER \
                 else "\n\n已走代理仍被拒，请更换代理节点。"
             tg_send("🔴 <b>eknodes 登录失败</b>\n\n请检查凭据 / Vercel 检查 / "
                     "Turnstile。" + hint, "ek_login_failed.png")
