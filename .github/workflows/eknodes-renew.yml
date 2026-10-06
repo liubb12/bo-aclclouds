@@ -65,13 +65,18 @@ jobs:
           sleep 3
           # 打印 sing-box 配置（脱敏 uuid）
           python -c "import json; j=json.load(open('singbox_config.json')); o=j['outbounds'][0]; o['uuid']=o.get('uuid','')[:4]+'...' if 'uuid' in o else ''; print(json.dumps(o, ensure_ascii=False, indent=2))"
-          # 测试: 通过代理访问 eknodes 登录页, HTTP 200 即算连通
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
-            -x "$PROXY_URL" "https://dash.eknodes.es/login")
-          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
-            echo "✅ 代理连通 OK (HTTP $HTTP_CODE)"
+          # 分级测试: 1) 纯 HTTP 过代理(验证 WS 通道) 2) HTTPS 3) 目标站
+          for T in 'http://httpbin.org/ip' 'https://api.ipify.org' 'https://dash.eknodes.es/login'; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 -x "$PROXY_URL" "$T" || echo "ERR$?")
+            echo "  测试 $T → $CODE"
+          done
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 -x "$PROXY_URL" "https://dash.eknodes.es/login" || echo "000")
+          if [ "$CODE" = "200" ] || [ "$CODE" = "301" ] || [ "$CODE" = "302" ] || [ "$CODE" = "403" ]; then
+            echo "✅ 代理连通 OK (目标站 HTTP $CODE)"
           else
-            echo "⚠️ 代理连通测试 HTTP $HTTP_CODE，继续运行（代理可能仅不支持海外 DNS 查询，不影响站点访问）"
+            echo "❌ 代理连不通目标站 (HTTP $CODE)，sing-box 日志:"
+            tail -30 /tmp/sing-box.log
+            echo "⚠️ 继续运行（主脚本会重试），若主脚本也失败请把本段日志发给开发者"
           fi
 
       - name: Run renew (Xvfb 虚拟显示器)
