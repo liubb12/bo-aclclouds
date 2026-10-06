@@ -71,7 +71,9 @@ jobs:
             echo "  测试 $T → $CODE"
           done
           CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 -x "$PROXY_URL" "https://dash.eknodes.es/login" || echo "000")
-          if [ "$CODE" = "200" ] || [ "$CODE" = "301" ] || [ "$CODE" = "302" ] || [ "$CODE" = "403" ]; then
+          # 200/301/302/403/429 都算连通: 能拿到 HTTP 响应就证明代理通,
+          # 429=限流 403=WAF, 都是站点对裸 curl 的拦截, 浏览器跑主脚本不受影响
+          if [ "$CODE" = "200" ] || [ "$CODE" = "301" ] || [ "$CODE" = "302" ] || [ "$CODE" = "403" ] || [ "$CODE" = "429" ]; then
             echo "✅ 代理连通 OK (目标站 HTTP $CODE)"
           else
             echo "❌ 代理连不通目标站 (HTTP $CODE)，sing-box 日志:"
