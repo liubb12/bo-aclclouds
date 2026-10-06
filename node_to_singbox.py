@@ -6,6 +6,7 @@
 import base64
 import json
 import os
+import re
 import sys
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -52,6 +53,8 @@ def parse_vmess(link):
             "enabled": True,
             "server_name": cfg.get("sni") or host or cfg["add"],
             "insecure": False,
+            # CF 系节点对 Go 原生 TLS 指纹不友好, 用 Chrome 指纹
+            "utls": {"enabled": True, "fingerprint": "chrome"},
         }
     elif tls in ("none", "", "0"):
         out["tls"] = {"enabled": False}
@@ -60,13 +63,25 @@ def parse_vmess(link):
     fake_type = (cfg.get("type") or "none").lower()
 
     if net == "ws":
+        # v2ray 风格 early data: path 里的 "?ed=2560" 必须拆成
+        # max_early_data + Sec-WebSocket-Protocol, 否则 CF 边缘握手直接拒
+        ed = None
+        if path and "?ed=" in path:
+            path, _, qs = path.partition("?")
+            m = re.search(r"ed=(\d+)", qs)
+            if m:
+                ed = int(m.group(1))
         tr = {"type": "ws"}
         if path:
             tr["path"] = path if path.startswith("/") else "/" + path
         if host:
             tr["headers"] = {"Host": host}
+        if ed:
+            tr["max_early_data"] = ed
+            tr["early_data_header_name"] = "Sec-WebSocket-Protocol"
         out["transport"] = tr
-        print(f"  transport=ws path={path or '(空)'} host={host or '(空)'}", file=sys.stderr)
+        print(f"  transport=ws path={path or '(空)'} host={host or '(空)'} "
+              f"ed={ed}", file=sys.stderr)
     elif net == "grpc":
         out["transport"] = {
             "type": "grpc",
