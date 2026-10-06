@@ -199,9 +199,24 @@ def real_click(driver, element):
 VERCEL_HINT_RE = re.compile(
     r"press\s*(?:&|and)?\s*hold|hold to confirm|verifying (you|that)|"
     r"you are human|comprobando|verificando tu|un momento, por favor|"
-    r"please wait while we",
+    r"please wait while we|security checkpoint",
     re.IGNORECASE,
 )
+
+# 浏览器校验失败文案 (出现说明质询已跑完但被拒, 刷新重跑有新机会)
+VERCEL_FAILED_RE = re.compile(
+    r"failed to verify|verification failed|no se pudo verificar",
+    re.IGNORECASE,
+)
+
+
+def vercel_failed(driver):
+    """质询已跑完但浏览器被拒 (Failed to verify your browser)"""
+    try:
+        body = (driver.get_text("body") or "")[:600]
+        return bool(VERCEL_FAILED_RE.search(body))
+    except Exception:
+        return False
 
 
 def vercel_checkpoint(driver):
@@ -302,23 +317,67 @@ EMAIL_SEL = "input#email, input[name='email'], input[type='email']"
 PWD_SEL = "input#password, input[name='password'], input[type='password']"
 
 
+def page_has_email(driver):
+    try:
+        return bool(driver.find_elements(By.CSS_SELECTOR, EMAIL_SEL))
+    except Exception:
+        return False
+
+
 def do_login(driver):
     log(f"🌐 打开登录页: {LOGIN_URL}")
-    driver.get(LOGIN_URL)
-    time.sleep(4)
 
-    # 等 Vercel 检查放行; 卡住就重开一次 (本站不是整页 CF 盾, 不用 reconnect)
-    try:
-        driver.wait_for_element_visible(EMAIL_SEL, timeout=20)
-    except Exception:
-        if vercel_checkpoint(driver):
-            log("  🛡️ 命中 Vercel 安全检查, 等待自动放行...")
-            wait_vercel(driver, timeout=30)
-        if not driver.find_elements(By.CSS_SELECTOR, EMAIL_SEL):
-            driver.get(LOGIN_URL)
-            time.sleep(4)
-            wait_vercel(driver, timeout=20)
-        driver.wait_for_element_visible(EMAIL_SEL, timeout=20)
+    def _wait_stable(max_wait=55):
+        """循环等: URL 是 login 且能看到邮箱框; 中间卡住 Vercel/CF 就等"""
+        deadline = time.time() + max_wait
+        while time.time() < deadline:
+            cur = (driver.current_url or "").lower()
+            # 被重定向到安全检查页就等自动放行
+            if not cur.rstrip("/").endswith("/login"):
+                log(f"  ⏳ 当前 URL: {driver.current_url}，等待跳转回 login...")
+                time.sleep(2.5)
+                continue
+            if page_has_email(driver):
+                return True
+            # 质询已跑完但浏览器被拒: 重新加载页面重跑质询
+            if vercel_failed(driver):
+                log("  🛡️ Vercel 校验被拒 (Failed to verify)，刷新重跑质询...")
+                driver.get(LOGIN_URL)
+                time.sleep(6)
+                continue
+            # 卡住常见原因: Vercel 检查页还在或 Turnstile 加载中
+            if vercel_checkpoint(driver):
+                log("  🛡️ 命中 Vercel 安全检查, 等待自动放行...")
+                wait_vercel(driver, timeout=20)
+                time.sleep(2)
+                continue
+            # 也可能是隐形 Turnstile 正在加载
+            if visible_turnstiles(driver):
+                click_turnstile(driver, where="登录页")
+                time.sleep(3)
+                continue
+            # 页面存在但 email 仍不可见: 等 JS 渲染完成
+            log("  ⏳ 页面已加载，等待邮箱输入框出现...")
+            time.sleep(2)
+        return page_has_email(driver)
+
+    for retry in (1, 2, 3, 4):
+        driver.get(LOGIN_URL)
+        time.sleep(6 if retry == 1 else 4)
+        if _wait_stable(max_wait=50 if retry == 1 else 35):
+            break
+        if retry == 4:
+            # 诊断: 记录当时页面状态, 便于判断卡在哪个环节
+            try:
+                log(f"  🔍 卡住诊断: title={driver.get_title()!r} "
+                    f"url={driver.current_url!r}")
+                body = (driver.get_text("body") or "").strip().replace("\n", " | ")
+                log(f"  🔍 页面文本: {body[:300] or '(空白)'}")
+            except Exception:
+                pass
+            shot(driver, "ek_login_stuck.png")
+            log("  ❌ 连续两次打开登录页均无法找到邮箱框，疑似被安全检查拦截")
+            return False
 
     email_el = driver.find_element(By.CSS_SELECTOR, EMAIL_SEL)
     fill_input(driver, email_el, EK_EMAIL)
@@ -636,8 +695,12 @@ def main():
 
         if not do_login(driver):
             shot(driver, "ek_login_failed.png")
+            hint = ("\n\n检测到 Vercel 浏览器校验被拒，GitHub 机房 IP 信誉低，"
+                    "建议在仓库 Secret 配置 <code>PROXY_SERVER</code>"
+                    "（http/socks5 无账密代理）后重试。") if not PROXY_SERVER \
+                else "\n\n已走代理仍被拒，请更换代理节点。"
             tg_send("🔴 <b>eknodes 登录失败</b>\n\n请检查凭据 / Vercel 检查 / "
-                    "Turnstile / 代理。", "ek_login_failed.png")
+                    "Turnstile。" + hint, "ek_login_failed.png")
             return
 
         # ---------- 服务器列表 ----------
