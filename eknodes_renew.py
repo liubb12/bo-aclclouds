@@ -324,6 +324,19 @@ def page_has_email(driver):
         return False
 
 
+def open_with_disconnect(driver, url, reconnect_time=6):
+    """
+    用 uc_open_with_reconnect 打开页面:
+    加载后断开 CDP 连接, 质询期间页面无自动化痕迹, 过 Vercel 盾最关键的一步。
+    失败时回退普通 get。
+    """
+    try:
+        driver.uc_open_with_reconnect(url, reconnect_time=reconnect_time)
+    except Exception as e:
+        log(f"  ℹ️ uc_open_with_reconnect 不可用({str(e)[:80]}), 回退普通打开")
+        driver.get(url)
+
+
 def do_login(driver):
     log(f"🌐 打开登录页: {LOGIN_URL}")
 
@@ -350,7 +363,8 @@ def do_login(driver):
                     driver.execute_script("try{sessionStorage.clear();}catch(e){}")
                 except Exception:
                     pass
-                driver.get(LOGIN_URL)
+                # 清完用 disconnect 模式重开, 过盾
+                open_with_disconnect(driver, LOGIN_URL, reconnect_time=6)
                 time.sleep(6)
                 continue
             # 卡住常见原因: Vercel 检查页还在或 Turnstile 加载中
@@ -370,7 +384,8 @@ def do_login(driver):
         return page_has_email(driver)
 
     for retry in (1, 2, 3, 4):
-        driver.get(LOGIN_URL)
+        # 首次和重试都用 disconnect 模式开页, 过 Vercel 盾
+        open_with_disconnect(driver, LOGIN_URL, reconnect_time=6 if retry == 1 else 5)
         time.sleep(6 if retry == 1 else 4)
         if _wait_stable(max_wait=50 if retry == 1 else 35):
             break
