@@ -324,13 +324,15 @@ def page_has_email(driver):
         return False
 
 
-def open_with_disconnect(driver, url, reconnect_time=6):
+def open_with_disconnect(driver, url, reconnect_time=10):
     """
     用 uc_open_with_reconnect 打开页面:
     加载后断开 CDP 连接, 质询期间页面无自动化痕迹, 过 Vercel 盾最关键的一步。
+    reconnect_time 必须 >= 质询耗时(约5~8秒), 否则重连过早 CDP 又暴露。
     失败时回退普通 get。
     """
     try:
+        log(f"  🔌 断开模式打开 (reconnect={reconnect_time}s)...")
         driver.uc_open_with_reconnect(url, reconnect_time=reconnect_time)
     except Exception as e:
         log(f"  ℹ️ uc_open_with_reconnect 不可用({str(e)[:80]}), 回退普通打开")
@@ -364,8 +366,8 @@ def do_login(driver):
                 except Exception:
                     pass
                 # 清完用 disconnect 模式重开, 过盾
-                open_with_disconnect(driver, LOGIN_URL, reconnect_time=6)
-                time.sleep(6)
+                open_with_disconnect(driver, LOGIN_URL, reconnect_time=14)
+                time.sleep(8)
                 continue
             # 卡住常见原因: Vercel 检查页还在或 Turnstile 加载中
             if vercel_checkpoint(driver):
@@ -385,7 +387,7 @@ def do_login(driver):
 
     for retry in (1, 2, 3, 4):
         # 首次和重试都用 disconnect 模式开页, 过 Vercel 盾
-        open_with_disconnect(driver, LOGIN_URL, reconnect_time=6 if retry == 1 else 5)
+        open_with_disconnect(driver, LOGIN_URL, reconnect_time=10 + retry * 2)
         time.sleep(6 if retry == 1 else 4)
         if _wait_stable(max_wait=50 if retry == 1 else 35):
             break
