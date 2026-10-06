@@ -12,8 +12,6 @@ jobs:
   renew:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
 
     steps:
       - name: Checkout
@@ -42,6 +40,27 @@ jobs:
           fi
           google-chrome --version
 
+      # 配了 NODE_LINK (vmess:// / vless://) 才装 sing-box 起本地代理
+      - name: Setup sing-box proxy (住宅节点)
+        if: ${{ secrets.NODE_LINK != '' }}
+        env:
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+        run: |
+          SB_VER=$(curl -sL https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -oP '"tag_name":\s*"v?\K[^"]+')
+          curl -sL -o sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-amd64.tar.gz"
+          tar -xzf sing-box.tar.gz
+          sudo mv sing-box-*/sing-box /usr/local/bin/sing-box
+          rm -rf sing-box.tar.gz sing-box-*/
+          # VMess 链接 -> sing-box 配置, 本地监听 127.0.0.1:1080
+          CONV=$(find . -name node_to_singbox.py -not -path '*/.git/*' | head -1)
+          PROXY_URL=$(python "$CONV" | tail -1)
+          echo "PROXY_SERVER=$PROXY_URL" >> $GITHUB_ENV
+          echo "Local proxy: $PROXY_URL"
+          # 后台启动并验证连通
+          nohup sing-box run -c singbox_config.json >/tmp/sing-box.log 2>&1 &
+          sleep 3
+          curl -s --max-time 15 -x "$PROXY_URL" https://api.ipify.org && echo " (代理出口IP)" || { echo "❌ 代理连通测试失败"; cat /tmp/sing-box.log; exit 1; }
+
       - name: Run renew (Xvfb 虚拟显示器)
         env:
           EK_EMAIL: ${{ secrets.EK_EMAIL }}
@@ -49,7 +68,7 @@ jobs:
           EK_MAX_DAYS: ${{ vars.EK_MAX_DAYS }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+          PROXY_SERVER: ${{ env.PROXY_SERVER || secrets.PROXY_SERVER }}
         run: |
           export DISPLAY=:99
           Xvfb :99 -screen 0 1920x1080x24 &
@@ -62,6 +81,7 @@ jobs:
             find . -type f | head -50
             exit 1
           fi
+          echo "PROXY 状态: ${PROXY_SERVER:+已配置}"
           python "$SCRIPT"
 
       - name: Upload screenshots (失败时排查用)
