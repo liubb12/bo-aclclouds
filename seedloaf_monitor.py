@@ -421,14 +421,25 @@ def do_login(driver):
 # 世界卡片识别
 # ------------------------------------------------------------
 READ_WORLDS_JS = r"""
-document.querySelectorAll('[data-seed-tag]').forEach(e =>
-    e.removeAttribute('data-seed-tag'));
-const btns = [...document.querySelectorAll('button')].filter(el => {
-    const t = (el.innerText || '').trim().toLowerCase();
-    return (t === 'start world' || t === 'stop world')
-        && el.offsetParent !== null;
+const norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+// offsetParent 挡不住 visibility:hidden / opacity:0, 必须用 computed style
+const isVis = el => {
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden'
+        || parseFloat(cs.opacity) < 0.05) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 10 && r.height > 10;
+};
+document.querySelectorAll('[data-seed-tag]').forEach(e => {
+    e.removeAttribute('data-seed-tag');
+    e.removeAttribute('data-seed-world');
 });
-return btns.map((btn, idx) => {
+// Stop World 按钮右侧带下拉箭头, 文本可能是 "stop world ⌄", 用前缀正则
+const btns = [...document.querySelectorAll('button')].filter(el => {
+    const t = norm(el.innerText);
+    return /^(start|stop) world\b/.test(t) && isVis(el);
+});
+let worlds = btns.map((btn, idx) => {
     let card = btn;
     for (let i = 0; i < 9; i++) {
         const p = card.parentElement;
@@ -441,15 +452,24 @@ return btns.map((btn, idx) => {
     const nameEl = card.querySelector('h1,h2,h3,h4');
     const text = (card.innerText || '');
     const subM = text.match(/[a-z0-9.-]+\.seedloaf\.gg/i);
+    const t = norm(btn.innerText);
     return {
         index: idx,
         name: nameEl ? (nameEl.innerText || '').trim() : '',
-        action: (btn.innerText || '').trim().toLowerCase(),
+        action: t.startsWith('stop world') ? 'stop world' : 'start world',
+        raw: t,
         subdomain: subM ? subM[0] : '',
-        online: /^\s*online/im.test(text) || /\bonline\b/i.test(text),
+        online: /\bonline\b/i.test(text),
         text: text.slice(0, 300)
     };
 });
+// 同一世界同时匹配到 start+stop 时去重, 优先信 stop (在线)
+const byName = {};
+for (const w of worlds) {
+    const k = w.name || ('idx' + w.index);
+    if (!byName[k] || byName[k].action !== 'stop world') byName[k] = w;
+}
+return Object.values(byName);
 """
 
 
@@ -560,7 +580,7 @@ def main():
 
         for w in worlds:
             state = "🟢在线" if (w["action"] == "stop world" or w["online"]) else "🔴离线"
-            log(f"   🌍 {w['name']} | {w['subdomain']} | {state} | 按钮={w['action']}")
+            log(f"   🌍 {w['name']} | {w['subdomain']} | {state} | 按钮原文={w.get('raw', w['action'])!r}")
 
         shot(driver, "seed_before.png")
 
