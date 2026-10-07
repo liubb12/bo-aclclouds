@@ -16,8 +16,8 @@
 #    离线时绿色 [Start World] 按钮, 在线时红色 [Stop World] 按钮
 #    + "Online" 文本 + 绿点。点 Start 后按钮转圈, ~30s 变 Stop。
 #
-# 策略: 在线 → 静默退出; 离线 → 点 Start World → 复查确认 → TG 通知;
-#       任何异常/登录失败 → 截图 + TG 告警。
+# 策略: 在线 → TG 发「巡检正常」简报; 离线 → 点 Start World → 复查确认 →
+#       TG 通知; 任何异常/登录失败 → 截图 + TG 告警。
 #
 # 运行: GitHub Actions + Xvfb, headless=False, uc=True。
 # Secrets: SEED_EMAIL SEED_PASSWORD TG_BOT_TOKEN TG_CHAT_ID
@@ -453,9 +453,17 @@ let worlds = btns.map((btn, idx) => {
     const text = (card.innerText || '');
     const subM = text.match(/[a-z0-9.-]+\.seedloaf\.gg/i);
     const t = norm(btn.innerText);
+    // Stop 按钮的 DOM 位置可能找不到标题祖先, 用卡片文本兜底:
+    // 第一条不含 子域名/按钮/状态词 的行就是世界名
+    let name = nameEl ? (nameEl.innerText || '').trim() : '';
+    if (!name) {
+        const line = text.split('\n').map(s => s.trim()).find(l =>
+            l && !/seedloaf\.gg|manage world|start world|stop world|^online$/i.test(l));
+        name = line || '';
+    }
     return {
         index: idx,
-        name: nameEl ? (nameEl.innerText || '').trim() : '',
+        name: name,
         action: t.startsWith('stop world') ? 'stop world' : 'start world',
         raw: t,
         subdomain: subM ? subM[0] : '',
@@ -587,7 +595,15 @@ def main():
         offline = [w for w in worlds
                    if w["action"] == "start world" and not w["online"]]
         if not offline:
-            log("🟢 全部世界在线，静默退出（不发 TG）")
+            log("🟢 全部世界在线")
+            detail = "\n".join(
+                f"🖥️ <code>{html.escape(w['name'] or 'world')}</code>"
+                + (f"｜<code>{html.escape(w['subdomain'])}</code>" if w["subdomain"] else "")
+                + "｜🟢 在线"
+                for w in worlds)
+            now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            tg_send(f"ℹ️ <b>seedloaf 巡检正常</b>\n\n{detail}\n\n"
+                    f"⏰ <code>{now_str}</code>", "seed_before.png")
             return
 
         # ---------- 逐台开机 ----------
