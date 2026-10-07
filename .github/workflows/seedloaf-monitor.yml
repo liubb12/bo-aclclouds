@@ -1,0 +1,106 @@
+name: seedloaf Auto Start
+
+on:
+  # 北京时间 07:43 / 19:43 (UTC 23:43 / 11:43)
+  schedule:
+    - cron: "43 23,11 * * *"
+  workflow_dispatch: # 手动调试
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install "seleniumbase>=4.30.0" "requests>=2.31.0" "requests[socks]"
+
+      - name: Ensure Chrome and Xvfb
+        run: |
+          if ! command -v google-chrome >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y google-chrome-stable
+          fi
+          if ! command -v Xvfb >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y xvfb
+          fi
+          google-chrome --version
+
+      # 配了 NODE_LINK (vmess:// / vless://) 才装 sing-box 起本地代理
+      # 注意: secrets 不能用在 if: 条件里, 只能在 run 脚本里判空
+      - name: Setup sing-box proxy (住宅节点, 可选)
+        env:
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+        run: |
+          if [ -z "$NODE_LINK" ]; then
+            echo "ℹ️ 未配置 NODE_LINK，跳过代理设置"
+            exit 0
+          fi
+          SB_VER=$(curl -sL https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -oP '"tag_name":\s*"v?\K[^"]+')
+          curl -sL -o sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-amd64.tar.gz"
+          tar -xzf sing-box.tar.gz
+          sudo mv sing-box-*/sing-box /usr/local/bin/sing-box
+          rm -rf sing-box.tar.gz sing-box-*/
+          # VMess 链接 -> sing-box 配置, 本地监听 127.0.0.1:1080
+          CONV=$(find . -name node_to_singbox.py -not -path '*/.git/*' | head -1)
+          PROXY_URL=$(python "$CONV" | tail -1)
+          echo "PROXY_SERVER=$PROXY_URL" >> $GITHUB_ENV
+          echo "Local proxy: $PROXY_URL"
+          nohup sing-box run -c singbox_config.json >/tmp/sing-box.log 2>&1 &
+          sleep 3
+          # 分级测试: 1) 纯 HTTP 2) HTTPS 3) 目标站
+          for T in 'http://httpbin.org/ip' 'https://api.ipify.org' 'https://seedloaf.com/dashboard'; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 -x "$PROXY_URL" "$T" || echo "ERR$?")
+            echo "  测试 $T → $CODE"
+          done
+          echo "  出口 IP 信息:"
+          curl -s --max-time 15 -x "$PROXY_URL" "https://ipinfo.io/json" || echo "  (ipinfo 查询失败)"
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 -x "$PROXY_URL" "https://seedloaf.com/dashboard" || echo "000")
+          if [ "$CODE" = "200" ] || [ "$CODE" = "301" ] || [ "$CODE" = "302" ] || [ "$CODE" = "403" ] || [ "$CODE" = "429" ]; then
+            echo "✅ 代理连通 OK (目标站 HTTP $CODE)"
+          else
+            echo "❌ 代理连不通目标站 (HTTP $CODE)，sing-box 日志:"
+            tail -30 /tmp/sing-box.log
+            echo "⚠️ 继续运行（主脚本会重试），若主脚本也失败请把本段日志发给开发者"
+          fi
+
+      - name: Run monitor (Xvfb 虚拟显示器)
+        env:
+          SEED_EMAIL: ${{ secrets.SEED_EMAIL }}
+          SEED_PASSWORD: ${{ secrets.SEED_PASSWORD }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          PROXY_SERVER: ${{ env.PROXY_SERVER || secrets.PROXY_SERVER }}
+        run: |
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          SCRIPT=$(find . -name seedloaf_monitor.py -not -path '*/.git/*' | head -1)
+          echo "Using script: $SCRIPT"
+          if [ -z "$SCRIPT" ]; then
+            echo "❌ 仓库里没找到 seedloaf_monitor.py"
+            find . -type f | head -50
+            exit 1
+          fi
+          echo "PROXY 状态: ${PROXY_SERVER:+已配置}"
+          python "$SCRIPT"
+
+      - name: Upload screenshots (失败时排查用)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seedloaf-screenshots
+          path: "*.png"
+          if-no-files-found: ignore
+          retention-days: 7
