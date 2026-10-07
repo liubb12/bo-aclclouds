@@ -1,12 +1,12 @@
 name: eknodes Auto Renew
 
 on:
-  schedule:
-    # UTC 23:43 / 11:43 = 北京时间 07:43 / 19:43，一天 2 次
-    # 续期规则: 每天可点 1 次, 每次到期日 +1 天, 剩余上限 7 天。
-    # 一天 2 跑: 早上 Turnstile 没过, 晚上还有一次补回, 不会断保活。
-    # - cron: "43 23,11 * * *"
-  workflow_dispatch: # 支持手动点 "Run workflow" 测试
+  # 2026-10-06 起停用: Vercel checkpoint v2 对 Actions 机房 IP 综合评分必拒
+  # (WebRTC 堵漏 + WebGL 伪装均无效), 已迁移到软路由 Docker 住宅 IP 直连。
+  # 保留 workflow_dispatch 仅供调试, 别再开 schedule。
+  # schedule:
+  #   - cron: "43 23,11 * * *"
+  workflow_dispatch: # 手动调试用
 
 jobs:
   renew:
@@ -70,6 +70,10 @@ jobs:
             CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 -x "$PROXY_URL" "$T" || echo "ERR$?")
             echo "  测试 $T → $CODE"
           done
+          # 出口 IP 诊断: org/ASN 字段能看出来是住宅宽带还是机房
+          # (Vercel 综合评分里 IP 类型权重不低, 机房 IP + Xvfb 浏览器双重减分)
+          echo "  出口 IP 信息:"
+          curl -s --max-time 15 -x "$PROXY_URL" "https://ipinfo.io/json" || echo "  (ipinfo 查询失败)"
           CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 -x "$PROXY_URL" "https://dash.eknodes.es/login" || echo "000")
           # 200/301/302/403/429 都算连通: 能拿到 HTTP 响应就证明代理通,
           # 429=限流 403=WAF, 都是站点对裸 curl 的拦截, 浏览器跑主脚本不受影响
