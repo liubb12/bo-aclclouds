@@ -461,6 +461,22 @@ def read_worlds(driver):
         return []
 
 
+def read_worlds_stable(driver, rounds=8, interval=3):
+    """SPA 卡片先渲染默认状态再异步回填真实状态, 必须连续两轮
+    读到相同的 (名称,按钮) 组合才采信, 防止把在线误判成离线"""
+    prev = None
+    last = []
+    for i in range(rounds):
+        last = read_worlds(driver)
+        sig = sorted((w["name"], w["action"]) for w in last)
+        if last and sig == prev:
+            log(f"  🔁 状态已稳定（第 {i + 1} 轮读数一致）")
+            return last
+        prev = sig
+        time.sleep(interval)
+    return last
+
+
 def start_world(driver, world):
     """点击该世界的 Start World, 返回是否点到"""
     try:
@@ -471,8 +487,9 @@ def start_world(driver, world):
         return False
 
 
-def wait_world_online(driver, name, timeout=120):
-    """点击后复查: 卡片按钮变 Stop World / 出现 Online 文本才算成功"""
+def wait_world_online(driver, name, timeout=240):
+    """点击后复查: 卡片按钮变 Stop World / 出现 Online 文本才算成功。
+    MC 冷启动约 2 分钟, 超时后再刷新确认一次, 防止状态翻转边缘误判"""
     end = time.time() + timeout
     refreshed = False
     while time.time() < end:
@@ -488,6 +505,10 @@ def wait_world_online(driver, name, timeout=120):
             refreshed = True
             continue
         time.sleep(6)
+    # 超时: 最后再刷新确认一次
+    log("  🔄 超时，最后刷新确认一次...")
+    driver.get(DASHBOARD_URL)
+    time.sleep(10)
     worlds = read_worlds(driver)
     w = next((x for x in worlds if x["name"] == name), None)
     return bool(w and (w["action"] == "stop world" or w["online"])), w
@@ -525,13 +546,12 @@ def main():
                     + hint, "seed_login_failed.png")
             return
 
-        # ---------- 读世界卡片 ----------
+        # ---------- 读世界卡片 (状态异步回填, 需连续两轮一致才采信) ----------
         if "seedloaf.com/dashboard" not in (driver.current_url or ""):
             driver.get(DASHBOARD_URL)
             time.sleep(5)
-        time.sleep(2)
 
-        worlds = read_worlds(driver)
+        worlds = read_worlds_stable(driver)
         if not worlds:
             shot(driver, "seed_unknown.png")
             tg_send("⚪ <b>seedloaf 巡检异常</b>\n\n未识别到世界卡片，"
@@ -558,12 +578,12 @@ def main():
             if not start_world(driver, w):
                 results.append((w, False, "Start World 按钮点击失败"))
                 continue
-            ok, after = wait_world_online(driver, name, timeout=120)
+            ok, after = wait_world_online(driver, name, timeout=240)
             if ok:
                 log(f"  ✅ [{name}] 已上线")
                 results.append((w, True, after["subdomain"] if after else w["subdomain"]))
             else:
-                results.append((w, False, "点击后 120s 内未变为在线状态"))
+                results.append((w, False, "点击后 240s 内未确认在线"))
             time.sleep(2)
 
         shot(driver, "seed_after.png")
