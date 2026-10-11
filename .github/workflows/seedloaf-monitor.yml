@@ -1,6 +1,6 @@
 name: seedloaf Auto Start
 
-on:
+# on:
   # 北京时间 07:43 / 19:43 (UTC 23:43 / 11:43)
   # schedule:
    #  - cron: "43 23,11 * * *"
