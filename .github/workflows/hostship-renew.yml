@@ -1,7 +1,7 @@
 name: HostShip Auto Renew
 
 on:
-  schedule:
+  # schedule:
     # 每天 2 次: 北京 07:43 / 19:43 (UTC 23:43 / 11:43)
     # - cron: '43 23,11 * * *'
   workflow_dispatch:
