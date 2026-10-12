@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# ACLClouds 自动登录与服务器续期脚本 (Cap 验证修正版)
+# ACLClouds 自动登录与服务器续期脚本 (Cap 验证修正版 · VMess 代理)
 #
 # 关键事实 (2026-10-01 实测):
 # 1. 登录页 https://aclclouds.com/auth/login 直接 200, 是 React SPA
@@ -25,6 +25,14 @@ import re
 import html
 import time
 import subprocess
+import base64
+import io
+import json
+import shutil
+import socket
+import stat
+import zipfile
+from urllib.parse import urlparse, parse_qs, unquote
 import requests
 from datetime import datetime, timezone, timedelta
 from seleniumbase import Driver
@@ -42,7 +50,7 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 ACL_USERNAME = os.environ.get("ACL_USERNAME", "").strip()
 ACL_PASSWORD = os.environ.get("ACL_PASSWORD", "").strip()
-SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "").strip()
+VMESS_LINK = os.environ.get("VMESS_LINK", "").strip()
 
 
 # ------------------------------------------------------------
@@ -78,28 +86,145 @@ def tg_send(text: str, photo_path: str = None):
 
 
 # ------------------------------------------------------------
-# gost: SOCKS5 -> 本地 HTTP 代理 (SeleniumBase 只吃 http 代理)
+# VMess 代理: xray 在本地开 HTTP 入口 (SeleniumBase 只吃 http 代理)
+# 环境变量 VMESS_LINK 支持: v2rayN vmess://base64(JSON)、
+# vmess://uuid@host:port?type=ws&...、Shadowrocket vmess://base64(加密:uuid@host:port)?obfs=...
 # ------------------------------------------------------------
-def normalize_socks5_proxy(proxy_value: str) -> str:
-    proxy_value = (proxy_value or "").strip()
-    for prefix in ("socks5://", "socks://"):
-        if proxy_value.startswith(prefix):
-            proxy_value = proxy_value[len(prefix):]
-            break
-    if not proxy_value or ":" not in proxy_value:
-        raise ValueError("SOCKS5_PROXY 格式错误，应为 host:port 或 user:pass@host:port。")
-    return proxy_value
+XRAY_DIR = "bin"
 
 
-def wait_http_proxy_ready(port: int, timeout: int = 15):
+def _b64decode(s: str) -> str:
+    s = s.strip().replace("-", "+").replace("_", "/")
+    s += "=" * (-len(s) % 4)
+    return base64.b64decode(s).decode("utf-8", errors="ignore")
+
+
+def parse_vmess(link: str) -> dict:
+    link = link.strip().strip('"').strip("'").strip().lstrip("\ufeff")
+    link = link.splitlines()[0].strip() if link else ""
+    if not link.lower().startswith("vmess://"):
+        raise ValueError(f"VMESS_LINK 不是 vmess:// 链接 (开头: {link[:8]!r})")
+    body = link[len("vmess://"):].split("#")[0].strip()
+
+    # Shadowrocket 格式
+    b64_part, _, query = body.partition("?")
+    if "@" not in b64_part:
+        try:
+            decoded = _b64decode(b64_part).strip()
+        except Exception:
+            decoded = ""
+        m = re.match(r"^([^:@]+):([^@]+)@([^:]+):(\d+)$", decoded)
+        if m:
+            q = {k: v[0] for k, v in parse_qs(query).items()}
+            obfs = q.get("obfs", "").lower()
+            net = {"websocket": "ws", "ws": "ws", "grpc": "grpc", "h2": "h2", "http": "tcp"}.get(obfs, "tcp")
+            host = q.get("obfsParam", "")
+            return {
+                "add": m.group(3), "port": int(m.group(4)), "id": m.group(2),
+                "aid": int(q.get("alterId", 0) or 0), "scy": m.group(1) or "auto",
+                "net": net, "type": "http" if obfs == "http" else "none",
+                "host": host, "path": unquote(q.get("path", "")),
+                "tls": "tls" if q.get("tls") in ("1", "true", "tls") else "",
+                "sni": q.get("peer", "") or host, "alpn": q.get("alpn", ""), "fp": q.get("fp", ""),
+            }
+
+    # v2rayN 格式
+    if "@" not in body:
+        cfg = json.loads(_b64decode(body).strip().lstrip("\ufeff"))
+        return {
+            "add": cfg.get("add"), "port": int(cfg.get("port")), "id": cfg.get("id"),
+            "aid": int(cfg.get("aid") or 0), "scy": cfg.get("scy") or "auto",
+            "net": (cfg.get("net") or "tcp").lower(), "type": cfg.get("type") or "none",
+            "host": cfg.get("host") or "", "path": cfg.get("path") or "",
+            "tls": (cfg.get("tls") or "").lower(), "sni": cfg.get("sni") or "",
+            "alpn": cfg.get("alpn") or "", "fp": cfg.get("fp") or "",
+        }
+
+    # 标准 URI 格式
+    u = urlparse(link)
+    if not u.hostname or not u.port:
+        raise ValueError("vmess URI 缺少地址或端口")
+    q = {k: v[0] for k, v in parse_qs(u.query).items()}
+    return {
+        "add": u.hostname, "port": int(u.port), "id": unquote(u.username or ""),
+        "aid": int(q.get("aid", 0)), "scy": q.get("encryption", "auto"),
+        "net": q.get("type", "tcp").lower(), "type": q.get("headerType", "none"),
+        "host": q.get("host", ""), "path": unquote(q.get("path", q.get("serviceName", ""))),
+        "tls": q.get("security", "").lower(), "sni": q.get("sni", ""),
+        "alpn": q.get("alpn", ""), "fp": q.get("fp", ""),
+    }
+
+
+def build_xray_config(v: dict) -> dict:
+    net = v["net"]
+    stream = {"network": net}
+    if net == "ws":
+        stream["wsSettings"] = {"path": v["path"] or "/",
+                                "headers": {"Host": v["host"]} if v["host"] else {}}
+    elif net == "grpc":
+        stream["grpcSettings"] = {"serviceName": v["path"]}
+    elif net == "httpupgrade":
+        stream["httpupgradeSettings"] = {"path": v["path"] or "/", "host": v["host"]}
+    elif net in ("h2", "http"):
+        stream["network"] = "http"
+        stream["httpSettings"] = {"path": v["path"] or "/",
+                                  "host": [h for h in v["host"].split(",") if h]}
+    elif net == "tcp" and v["type"] == "http":
+        stream["tcpSettings"] = {"header": {"type": "http", "request": {
+            "path": [v["path"] or "/"],
+            "headers": {"Host": [h for h in v["host"].split(",") if h]}}}}
+
+    if v["tls"] == "tls":
+        tls = {"serverName": v["sni"] or v["host"] or v["add"],
+               "allowInsecure": os.environ.get("VMESS_INSECURE", "0") == "1"}
+        if v["alpn"]:
+            tls["alpn"] = [a for a in v["alpn"].split(",") if a]
+        if v["fp"]:
+            tls["fingerprint"] = v["fp"]
+        stream["security"] = "tls"
+        stream["tlsSettings"] = tls
+
+    return {
+        "log": {"loglevel": "warning"},
+        "inbounds": [{"listen": "127.0.0.1", "port": LOCAL_HTTP_PORT,
+                      "protocol": "http", "settings": {}}],
+        "outbounds": [{
+            "protocol": "vmess",
+            "settings": {"vnext": [{"address": v["add"], "port": v["port"],
+                                    "users": [{"id": v["id"], "alterId": v["aid"],
+                                               "security": v["scy"]}]}]},
+            "streamSettings": stream,
+        }],
+    }
+
+
+def ensure_xray() -> str:
+    found = shutil.which("xray")
+    local = os.path.join(XRAY_DIR, "xray")
+    if found:
+        return found
+    if os.path.exists(local):
+        return local
+    print("  ⬇️ 下载 xray-core ...", flush=True)
+    url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+    r = requests.get(url, timeout=120)
+    r.raise_for_status()
+    os.makedirs(XRAY_DIR, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        z.extract("xray", XRAY_DIR)
+    os.chmod(local, os.stat(local).st_mode | stat.S_IEXEC)
+    return local
+
+
+def wait_http_proxy_ready(port: int, timeout: int = 20):
     proxies = {"http": f"http://127.0.0.1:{port}", "https": f"http://127.0.0.1:{port}"}
     last_error = None
     start = time.time()
     while time.time() - start < timeout:
         try:
-            resp = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=8)
+            resp = requests.get("https://api.ipify.org", proxies=proxies, timeout=8)
             if resp.ok:
-                print("  ✅ 本地 HTTP 代理连通性测试成功")
+                print(f"  ✅ VMess 代理可用，出口 IP: {resp.text.strip()[:6]}***")
                 return
         except Exception as e:
             last_error = e
@@ -107,16 +232,23 @@ def wait_http_proxy_ready(port: int, timeout: int = 15):
     raise RuntimeError(f"本地 HTTP 代理就绪检测失败: {last_error}")
 
 
-def start_gost(socks_proxy: str) -> subprocess.Popen:
-    normalized = normalize_socks5_proxy(socks_proxy)
-    cmd = ["gost", "-L", f"http://127.0.0.1:{LOCAL_HTTP_PORT}", "-F", f"socks5://{normalized}"]
-    print("  🚀 启动 gost 代理中转...")
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(2)
-    if proc.poll() is not None:
-        raise RuntimeError("gost 启动失败，请检查 SOCKS5_PROXY 格式和 gost 安装。")
+def start_vmess(link: str) -> subprocess.Popen:
+    v = parse_vmess(link)
+    print(f"  🚀 启动 xray (VMess {v['add'][:3]}***:{v['port']} | {v['net']} | tls={v['tls'] or 'none'}) ...")
+    with open("xray-config.json", "w", encoding="utf-8") as f:
+        json.dump(build_xray_config(v), f, ensure_ascii=False)
+    proc = subprocess.Popen([ensure_xray(), "run", "-c", "xray-config.json"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    for _ in range(20):
+        if proc.poll() is not None:
+            raise RuntimeError("xray 启动失败: " + proc.stderr.read().decode(errors="ignore")[-400:])
+        try:
+            with socket.create_connection(("127.0.0.1", LOCAL_HTTP_PORT), timeout=1):
+                break
+        except OSError:
+            time.sleep(0.5)
     wait_http_proxy_ready(LOCAL_HTTP_PORT)
-    print(f"  ✅ gost 已启动，本地代理端口：{LOCAL_HTTP_PORT}")
+    print(f"  ✅ xray 已启动，本地 HTTP 代理端口：{LOCAL_HTTP_PORT}")
     return proc
 
 
@@ -414,15 +546,15 @@ def main():
         print("❌ 未配置 ACL_USERNAME 或 ACL_PASSWORD", flush=True)
         return
 
-    gost_proc = None
+    xray_proc = None
     uc_proxy = None
-    if SOCKS5_PROXY:
+    if VMESS_LINK:
         try:
-            gost_proc = start_gost(SOCKS5_PROXY)
+            xray_proc = start_vmess(VMESS_LINK)
             uc_proxy = f"http://127.0.0.1:{LOCAL_HTTP_PORT}"
-            print("🔗 代理检测正常，已启用中转。")
+            print("🔗 VMess 代理检测正常，已启用。")
         except Exception as e:
-            print(f"⚠️ 代理启动失败：{e}，将尝试直连。")
+            print(f"⚠️ VMess 代理启动失败：{e}，将尝试直连。")
 
     # GitHub Actions 里请配合 Xvfb 使用 headless=False (既有约定)
     driver = Driver(uc=True, headless=False, proxy=uc_proxy)
@@ -596,9 +728,9 @@ def main():
             driver.quit()
         except Exception:
             pass
-        if gost_proc:
-            gost_proc.terminate()
-            print("gost 进程已终止。")
+        if xray_proc:
+            xray_proc.terminate()
+            print("xray 进程已终止。")
 
 
 if __name__ == "__main__":
