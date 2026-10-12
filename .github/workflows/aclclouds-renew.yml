@@ -11,8 +11,6 @@ jobs:
   renew:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
 
     steps:
       - name: Checkout
@@ -41,22 +39,7 @@ jobs:
           fi
           google-chrome --version
 
-      - name: Install gost (仅当配置了 SOCKS5_PROXY)
-        if: env.SOCKS5_PROXY != ''
-        run: |
-          # gost v2 二进制在旧仓库 ginuerzh/gost, 是 gzip 单文件(不是 tar.gz)
-          curl -fL --retry 3 \
-            https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz \
-            -o gost.gz
-          file gost.gz
-          gunzip -f gost.gz
-          chmod +x gost
-          # 确认是 Linux 可执行文件而不是错误页面
-          if ! file gost | grep -q ELF; then
-            echo "❌ gost 下载内容不是可执行文件"; cat gost | head -20; exit 1
-          fi
-          sudo mv gost /usr/local/bin/gost
-          gost -V
+      # xray 由脚本自动下载, 不再需要安装 gost
 
       - name: Run renew (Xvfb 虚拟显示器)
         env:
@@ -64,7 +47,9 @@ jobs:
           ACL_PASSWORD: ${{ secrets.ACL_PASSWORD }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
+          VMESS_LINK: ${{ secrets.VMESS_LINK }}
+          # 节点是自签证书时打开下一行
+          # VMESS_INSECURE: '1'
         run: |
           export DISPLAY=:99
           Xvfb :99 -screen 0 1920x1080x24 &
