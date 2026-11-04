@@ -42,7 +42,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 
 BASE_URL = "https://aclclouds.com"
 LOGIN_URL = f"{BASE_URL}/auth/login"
-SERVER_ID = "75e19d55"
+SERVER_ID = "dfc46965"
 SERVER_CONSOLE_URL = f"{BASE_URL}/server/{SERVER_ID}"
 
 LOCAL_HTTP_PORT = 18080
