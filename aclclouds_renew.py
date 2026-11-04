@@ -526,7 +526,7 @@ def get_expire_info(driver) -> str:
     try:
         body_text = driver.get_text("body").replace("\u00a0", " ").replace("\u202f", " ")
         time_match = re.search(
-            r'(?i)(?:Time remaining|remaining|expire)[\s:]*([0-9]+\s*[jdhm]\s*(?:[0-9]+\s*[hm])?)',
+            r'(?i)(?:Time remaining|remaining|Temps restant|restant|Tiempo restante|restante|expire)[\s:]*([0-9]+\s*[jdhm]\s*(?:[0-9]+\s*[hm])?)',
             body_text,
         )
         if time_match:
@@ -630,7 +630,7 @@ def main():
         print(f"⏳ 续期前服务器状态: {expire_before}", flush=True)
 
         # ---------- 6. 找 Renew ----------
-        renew_xpath = "//button[contains(., 'Renew') or contains(., 'Renouveler')]"
+        renew_xpath = "//button[contains(., 'Renew') or contains(., 'Renouveler') or contains(., 'Renovar')]"
         renew_elements = driver.find_elements(By.XPATH, renew_xpath)
         now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
 
